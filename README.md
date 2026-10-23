@@ -52,19 +52,6 @@ This extension therefore:
 If X rotates again, paste the new ID into **Query ID override** in the popup, or add it
 to the top of `BOOKMARKS_QUERY_IDS` in `background.js`.
 
-### Troubleshooting
-
-| Message | Cause | Fix |
-| --- | --- | --- |
-| `Not signed in to X` | No `auth_token` cookie | Log in to x.com in a tab |
-| `CSRF token (ct0) missing` | Session cookie present, `ct0` absent | Reload x.com while signed in |
-| `X rejected the session (401/403)` | Session expired or invalidated | Sign in to x.com again |
-| `queryId ... returned 404 (rotated)` | X shipped a new web build | Enter the new ID in the popup |
-| `Rate limited` | Too many syncs | Wait a few minutes |
-
-**Debug Info** in the popup prints your cookie state and the ID candidates — send that
-output when reporting an issue.
-
 ## Privacy
 
 Everything runs locally. Your `auth_token` is read only to authenticate requests to
