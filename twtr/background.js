@@ -1,391 +1,385 @@
-// background.js with enhanced error handling
-// Constants for X/Twitter API endpoints
-const BOOKMARKS_URL = 'https://twitter.com/i/api/graphql/zZXycP0V6H7m-2r0ZW0h9A/Bookmarks';
-const AUTH_TOKEN_KEY = 'x_auth_token';
-const BOOKMARKS_CACHE_KEY = 'bookmarks_cache';
-const USERS_CACHE_KEY = 'users_cache';
+// background.js — X Bookmarks Feed v2
+//
+// Pulls your bookmarks from X's internal web GraphQL API using the browser's own
+// logged-in session. X rotates the query-ID hash on every web build, so the
+// current hash is tried first with known alternates as fallback, and the
+// extension reports a specific, actionable error instead of failing silently.
 
-// Initialize when extension is installed
+const GQL_URL = 'https://x.com/i/api/graphql';
+const BOOKMARKS_OP = 'Bookmarks';
+
+// Ordered newest-first. If X rotates again, put the new hash at the top.
+const BOOKMARKS_QUERY_IDS = [
+  'vvgIHIejOsbp0Dn5KytkZg', // twscrape main, Oct 2026
+  'qToeLeMs43Q8cr7tRYXmaQ', // twikit main
+  'zZXycP0V6H7m-2r0ZW0h9A', // 2025 (original)
+];
+
+// X's public web-client bearer. Confirmed unchanged against twikit / twscrape.
+const WEB_CLIENT_BEARER =
+  'AAAAAAAAAAAAAAAAAAAAANRILgAAAAAAnNwIzUejRCOuH5E6I8xnZz4puTs%3D1Zv7ttfk8LF81IUq16cHjhLTvJu4FA33AGWWjCpTnA';
+
+const STORE = {
+  enabled: 'enabled',
+  showRail: 'showRail',
+  frequency: 'frequency',
+  prioritizeRecent: 'prioritizeRecent',
+  lastUpdated: 'lastUpdated',
+  bookmarkCount: 'bookmarkCount',
+  bookmarks: 'bookmarks_cache',
+  users: 'users_cache',
+  queryId: 'bookmarks_query_id',
+  txnId: 'x_client_transaction_id',
+};
+
+// Feature flags the backend expects from the web client.
+const FEATURES = {
+  responsive_web_graphql_exclude_directive_enabled: true,
+  verified_phone_label_enabled: false,
+  creator_subscriptions_tweet_preview_api_enabled: true,
+  responsive_web_graphql_timeline_navigation_enabled: true,
+  responsive_web_graphql_skip_user_profile_image_extensions_enabled: false,
+  tweetypie_unmention_optimization_enabled: true,
+  responsive_web_edit_tweet_api_enabled: true,
+  graphql_is_translatable_rweb_tweet_is_translatable_enabled: true,
+  view_counts_everywhere_api_enabled: true,
+  longform_notetweets_consumption_enabled: true,
+  responsive_web_twitter_article_tweet_consumption_enabled: true,
+  tweet_awards_web_tipping_enabled: false,
+  freedom_of_speech_not_reach_fetch_enabled: true,
+  standardized_nudges_misinfo: true,
+  tweet_with_visibility_results_prefer_gql_limited_actions_policy_enabled: true,
+  longform_notetweets_rich_text_read_enabled: true,
+  longform_notetweets_inline_media_enabled: true,
+  responsive_web_media_download_video_enabled: false,
+  responsive_web_enhance_cards_enabled: false,
+  graphql_timeline_v2_bookmark_timeline: true,
+};
+
+const MAX_PAGES = 5;
+
+// ---------------------------------------------------------------- lifecycle
+
 chrome.runtime.onInstalled.addListener(() => {
-  console.log('Extension installed - initializing settings');
   chrome.storage.local.set({
-    enabled: true,
-    showIndicator: true,
-    frequency: 'medium',
-    prioritizeRecent: true,
-    lastUpdated: null,
-    bookmarkCount: 0
+    [STORE.enabled]: true,
+    [STORE.showRail]: true,
+    [STORE.frequency]: 'medium',
+    [STORE.prioritizeRecent]: true,
+    [STORE.lastUpdated]: null,
+    [STORE.bookmarkCount]: 0,
   });
+  console.log('[xbm] installed');
 });
 
-// Listen for messages from popup or content script
+// ---------------------------------------------------------------- messaging
+
 chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
-  console.log('Message received:', message);
-  
+  if (!message || !message.action) return;
+
   if (message.action === 'refreshBookmarks') {
-    console.log('Fetching bookmarks...');
-    
-    // Add delay to ensure proper response handling
     fetchBookmarks()
-      .then(result => {
-        console.log(`Successfully fetched ${result.length} bookmarks`);
-        sendResponse({ success: true, count: result.length });
-      })
-      .catch(error => {
-        console.error('Error fetching bookmarks:', error);
-        sendResponse({ 
-          success: false, 
-          error: error.message,
-          details: error.stack || 'No stack trace available'
-        });
-      });
-    return true; // Required for async response
+      .then((r) => sendResponse({ success: true, count: r.count, queryId: r.queryId }))
+      .catch((err) => sendResponse({ success: false, error: err.message, code: err.code || null }));
+    return true;
   }
-  
-  else if (message.action === 'getBookmarks') {
-    console.log('Getting cached bookmarks');
-    chrome.storage.local.get([BOOKMARKS_CACHE_KEY, USERS_CACHE_KEY], data => {
-      const bookmarks = data[BOOKMARKS_CACHE_KEY] || [];
-      console.log(`Retrieved ${bookmarks.length} bookmarks from cache`);
-      sendResponse({
-        bookmarks: bookmarks,
-        users: data[USERS_CACHE_KEY] || {}
-      });
+
+  if (message.action === 'getBookmarks') {
+    chrome.storage.local.get([STORE.bookmarks, STORE.users]).then((d) => {
+      sendResponse({ bookmarks: d[STORE.bookmarks] || [], users: d[STORE.users] || {} });
     });
-    return true; // Required for async response
+    return true;
   }
-  
-  else if (message.action === 'updateSettings') {
-    console.log('Updating settings:', message);
-    // If extension is being enabled, refresh bookmarks
-    if (message.enabled) {
-      fetchBookmarks()
-        .then(result => console.log(`Refreshed ${result.length} bookmarks after enabling`))
-        .catch(err => console.error('Error refreshing bookmarks:', err));
-    }
-  }
-  
-  else if (message.action === 'debugInfo') {
-    // Return debug information
-    getDebugInfo().then(info => {
-      sendResponse({ success: true, debug: info });
-    }).catch(err => {
-      sendResponse({ success: false, error: err.message });
+
+  if (message.action === 'updateSettings') {
+    chrome.storage.local.set(message.settings || {}).then(() => {
+      if (message.settings && message.settings[STORE.enabled]) {
+        fetchBookmarks().catch(() => {});
+      }
+      sendResponse({ success: true });
     });
+    return true;
+  }
+
+  if (message.action === 'debugInfo') {
+    getDebugInfo().then((info) => sendResponse({ success: true, debug: info }));
     return true;
   }
 });
 
-// Function to get debug information
 async function getDebugInfo() {
-  try {
-    const storage = await chrome.storage.local.get(null);
-    const cookies = await chrome.cookies.getAll({ domain: '.twitter.com' });
-    
-    return {
-      storage: {
-        enabled: storage.enabled,
-        bookmarkCount: storage.bookmarkCount,
-        lastUpdated: storage.lastUpdated,
-        hasAuthToken: !!storage[AUTH_TOKEN_KEY]
-      },
-      cookies: {
-        hasAuthCookie: cookies.some(c => c.name === 'auth_token'),
-        hasCSRFCookie: cookies.some(c => c.name === 'ct0'),
-        cookieCount: cookies.length,
-        cookieNames: cookies.map(c => c.name)
-      }
-    };
-  } catch (err) {
-    console.error('Error getting debug info:', err);
-    return { error: err.message };
-  }
-}
-
-// Function to extract auth token from cookies
-async function getAuthToken() {
-  console.log('Getting auth token from cookies...');
-  const cookies = await chrome.cookies.getAll({ domain: '.twitter.com' });
-  console.log(`Found ${cookies.length} Twitter cookies`);
-  
-  // Try multiple possible cookie names
-  const authCookie = 
-    cookies.find(cookie => cookie.name === 'auth_token') ||
-    cookies.find(cookie => cookie.name === 'kdt') ||
-    cookies.find(cookie => cookie.name === 'twid');
-  
-  if (!authCookie) {
-    // List available cookies for debugging
-    const cookieNames = cookies.map(c => c.name).join(', ');
-    console.error('Auth cookie not found. Available cookies:', cookieNames);
-    throw new Error('Not logged in to Twitter. Available cookies: ' + cookieNames);
-  }
-  
-  console.log(`Found auth cookie: ${authCookie.name}`);
-  return authCookie.value;
-}
-
-// Function to extract CSRF token from cookies
-async function getCSRFToken() {
-  console.log('Getting CSRF token from cookies...');
-  const cookies = await chrome.cookies.getAll({ domain: '.twitter.com' });
-  
-  // Try x.com domain if twitter.com doesn't have cookies
-  const xCookies = await chrome.cookies.getAll({ domain: '.x.com' });
-  const allCookies = [...cookies, ...xCookies];
-  
-  const csrfCookie = allCookies.find(cookie => cookie.name === 'ct0');
-  
-  if (!csrfCookie) {
-    // Check if we're on x.com instead of twitter.com
-    throw new Error('CSRF token not found. Try refreshing the Twitter/X page.');
-  }
-  
-  console.log('CSRF token found');
-  return csrfCookie.value;
-}
-
-// Function to fetch bookmarks from Twitter API
-async function fetchBookmarks() {
-  try {
-    console.log('Starting bookmark fetch process...');
-    const authToken = await getAuthToken();
-    const csrfToken = await getCSRFToken();
-    
-    // Store auth token for later use
-    chrome.storage.local.set({ [AUTH_TOKEN_KEY]: authToken });
-    console.log('Auth tokens retrieved and stored');
-    
-    // Try the new API endpoint first
-    const variables = JSON.stringify({
-      count: 100, // Maximum allowed by API
-      includePromotedContent: false
-    });
-    
-    const features = JSON.stringify({
-      responsive_web_graphql_exclude_directive_enabled: true,
-      verified_phone_label_enabled: false,
-      creator_subscriptions_tweet_preview_api_enabled: true,
-      responsive_web_graphql_timeline_navigation_enabled: true,
-      responsive_web_graphql_skip_user_profile_image_extensions_enabled: false,
-      tweetypie_unmention_optimization_enabled: true,
-      responsive_web_edit_tweet_api_enabled: true,
-      graphql_is_translatable_rweb_tweet_is_translatable_enabled: true,
-      view_counts_everywhere_api_enabled: true,
-      longform_notetweets_consumption_enabled: true,
-      responsive_web_twitter_article_tweet_consumption_enabled: false,
-      tweet_awards_web_tipping_enabled: false,
-      freedom_of_speech_not_reach_fetch_enabled: true,
-      standardized_nudges_misinfo: true,
-      tweet_with_visibility_results_prefer_gql_limited_actions_policy_enabled: true,
-      longform_notetweets_rich_text_read_enabled: true,
-      longform_notetweets_inline_media_enabled: true,
-      responsive_web_media_download_video_enabled: false,
-      responsive_web_enhance_cards_enabled: false
-    });
-    
-    // Try multiple possible API endpoints
-    const url = `${BOOKMARKS_URL}?variables=${encodeURIComponent(variables)}&features=${encodeURIComponent(features)}`;
-    
-    console.log('Fetching bookmarks from API...');
-    const response = await fetch(url, {
-      headers: {
-        'authorization': 'Bearer AAAAAAAAAAAAAAAAAAAAANRILgAAAAAAnNwIzUejRCOuH5E6I8xnZz4puTs%3D1Zv7ttfk8LF81IUq16cHjhLTvJu4FA33AGWWjCpTnA',
-        'x-csrf-token': csrfToken,
-        'x-twitter-auth-type': 'OAuth2Session',
-        'content-type': 'application/json',
-        'x-twitter-client-language': 'en',
-        'x-twitter-active-user': 'yes',
-        'Referer': 'https://twitter.com/i/bookmarks',
-        'Origin': 'https://twitter.com'
-      },
-      credentials: 'include'
-    });
-    
-    console.log('API response status:', response.status);
-    if (!response.ok) {
-      throw new Error(`API returned status ${response.status}: ${response.statusText}`);
-    }
-    
-    const data = await response.json();
-    console.log('Received API response, processing data...');
-    
-    // Handle different possible response formats
-    if (!data) {
-      throw new Error('Empty response from API');
-    }
-    
-    if (data.errors && data.errors.length > 0) {
-      const errorMsg = data.errors.map(e => e.message).join('; ');
-      throw new Error(`API returned errors: ${errorMsg}`);
-    }
-    
-    // Try different possible response structures
-    let bookmarksData;
-    if (data.data && data.data.bookmark_timeline) {
-      console.log('Using primary response structure');
-      const instructions = data.data.bookmark_timeline.timeline.instructions;
-      const timelineAddEntries = instructions.find(i => i.type === 'TimelineAddEntries');
-      
-      if (timelineAddEntries && timelineAddEntries.entries) {
-        bookmarksData = timelineAddEntries.entries.filter(e => e.entryId.startsWith('tweet-'));
-      } else {
-        console.warn('Timeline entries not found in expected format');
-        bookmarksData = [];
-      }
-    } else if (data.data && data.data.user && data.data.user.result && data.data.user.result.timeline) {
-      console.log('Using alternative response structure');
-      const timeline = data.data.user.result.timeline;
-      const instructions = timeline.timeline ? timeline.timeline.instructions : timeline.instructions;
-      const timelineAddEntries = instructions.find(i => i.type === 'TimelineAddEntries');
-      
-      if (timelineAddEntries && timelineAddEntries.entries) {
-        bookmarksData = timelineAddEntries.entries.filter(e => e.entryId.startsWith('tweet-'));
-      } else {
-        console.warn('Timeline entries not found in alternative format');
-        bookmarksData = [];
-      }
-    } else {
-      console.log('Response structure not recognized');
-      throw new Error('Unexpected API response format. Twitter may have changed their API.');
-    }
-    
-    console.log(`Found ${bookmarksData.length} bookmarked tweets`);
-    
-    // Process and store bookmarks
-    const bookmarks = [];
-    const users = {};
-    
-    for (const entry of bookmarksData) {
-      try {
-        // Handle possible different entry structures
-        let content;
-        if (entry.content && entry.content.itemContent && entry.content.itemContent.tweet_results) {
-          content = entry.content.itemContent.tweet_results.result;
-        } else if (entry.content && entry.content.item && entry.content.item.itemContent) {
-          content = entry.content.item.itemContent.tweet_results.result;
-        } else {
-          console.warn('Unrecognized tweet entry structure, skipping:', entry.entryId);
-          continue;
-        }
-        
-        // Check if we have a tombstone (deleted tweet)
-        if (content.__typename === 'TweetTombstone') {
-          console.log('Skipping tombstone tweet');
-          continue;
-        }
-        
-        // Extract tweet data
-        const tweetId = content.rest_id || (content.legacy && content.legacy.id_str);
-        if (!tweetId) {
-          console.warn('No tweet ID found, skipping entry');
-          continue;
-        }
-        
-        // Extract user data
-        let user;
-        if (content.core && content.core.user_results && content.core.user_results.result) {
-          user = content.core.user_results.result;
-        } else if (content.user) {
-          user = content.user;
-        } else {
-          console.warn('No user data found for tweet:', tweetId);
-          continue;
-        }
-        
-        const userId = user.rest_id || user.id_str;
-        const userName = (user.legacy && user.legacy.screen_name) || user.screen_name;
-        
-        if (!userId || !userName) {
-          console.warn('Incomplete user data for tweet:', tweetId);
-          continue;
-        }
-        
-        // Store user data
-        users[userId] = {
-          id: userId,
-          username: userName,
-          displayName: (user.legacy && user.legacy.name) || user.name || userName,
-          profileImage: (user.legacy && user.legacy.profile_image_url_https) || user.profile_image_url_https || '',
-          verified: !!(user.is_blue_verified || (user.legacy && user.legacy.verified))
-        };
-        
-        // Get tweet text
-        const tweetText = (content.legacy && content.legacy.full_text) || 
-                         (content.tweet && content.tweet.full_text) || 
-                         content.full_text || 
-                         '';
-        
-        // Store tweet data
-        bookmarks.push({
-          id: tweetId,
-          userId: userId,
-          text: tweetText,
-          created_at: (content.legacy && content.legacy.created_at) || content.created_at || new Date().toISOString(),
-          bookmarked_at: Date.now(),
-          media: (content.legacy && content.legacy.entities && content.legacy.entities.media) || [],
-          likes: (content.legacy && content.legacy.favorite_count) || 0,
-          retweets: (content.legacy && content.legacy.retweet_count) || 0,
-          replies: (content.legacy && content.legacy.reply_count) || 0
-        });
-      } catch (err) {
-        console.error('Error processing bookmark entry:', err, entry);
-      }
-    }
-    
-    console.log(`Successfully processed ${bookmarks.length} bookmarks`);
-    
-    // Save to local storage
-    chrome.storage.local.set({
-      [BOOKMARKS_CACHE_KEY]: bookmarks,
-      [USERS_CACHE_KEY]: users,
-      lastUpdated: Date.now(),
-      bookmarkCount: bookmarks.length
-    });
-    
-    console.log('Bookmarks saved to local storage');
-    return bookmarks;
-  } catch (error) {
-    console.error('Error in fetchBookmarks:', error);
-    throw error;
-  }
-}
-
-// Function to try alternative API endpoint for bookmarks
-async function fetchBookmarksAlternative(authToken, csrfToken) {
-  console.log('Trying alternative bookmarks endpoint...');
-  
-  const altUrl = 'https://twitter.com/i/api/2/timeline/bookmark.json?count=100';
-  
-  const response = await fetch(altUrl, {
-    headers: {
-      'authorization': 'Bearer AAAAAAAAAAAAAAAAAAAAANRILgAAAAAAnNwIzUejRCOuH5E6I8xnZz4puTs%3D1Zv7ttfk8LF81IUq16cHjhLTvJu4FA33AGWWjCpTnA',
-      'x-csrf-token': csrfToken,
-      'x-twitter-auth-type': 'OAuth2Session',
-      'x-twitter-client-language': 'en',
-      'x-twitter-active-user': 'yes'
+  const [storage, cookies] = await Promise.all([chrome.storage.local.get(null), getCookies()]);
+  return {
+    storage: {
+      enabled: storage[STORE.enabled],
+      showRail: storage[STORE.showRail],
+      bookmarkCount: storage[STORE.bookmarkCount],
+      lastUpdated: storage[STORE.lastUpdated],
+      queryId: storage[STORE.queryId] || null,
+      txnId: storage[STORE.txnId] ? 'present' : 'absent',
     },
-    credentials: 'include'
-  });
-  
-  if (!response.ok) {
-    throw new Error(`Alternative API returned status ${response.status}`);
-  }
-  
-  return response.json();
+    session: {
+      hasAuthToken: !!cookies.authToken,
+      hasCsrf: !!cookies.csrf,
+      authCookieName: cookies.authCookieName || null,
+      xCookieCount: cookies.xCount,
+      twitterCookieCount: cookies.twCount,
+      cookieNames: cookies.names,
+    },
+    candidates: BOOKMARKS_QUERY_IDS,
+  };
 }
 
-// Set up periodic refresh of bookmarks (every 4 hours)
+// ------------------------------------------------------------------ session
+
+async function getCookies() {
+  // Cookies live on x.com now; twitter.com is kept for older sessions.
+  const [x, tw] = await Promise.all([
+    chrome.cookies.getAll({ domain: '.x.com' }),
+    chrome.cookies.getAll({ domain: '.twitter.com' }),
+  ]);
+  const all = [...x, ...tw];
+  const authToken =
+    (all.find((c) => c.name === 'auth_token') || {}).value ||
+    (all.find((c) => c.name === 'kdt') || {}).value ||
+    null;
+  const csrf = (all.find((c) => c.name === 'ct0') || {}).value || null;
+
+  return {
+    authToken,
+    csrf,
+    authCookieName: all.find((c) => c.name === 'auth_token')
+      ? 'auth_token'
+      : all.find((c) => c.name === 'kdt')
+        ? 'kdt'
+        : null,
+    names: all.map((c) => c.name),
+    xCount: x.length,
+    twCount: tw.length,
+  };
+}
+
+class XbmError extends Error {
+  constructor(message, code) {
+    super(message);
+    this.code = code;
+  }
+}
+
+// ------------------------------------------------------------------- fetch
+
+async function gqlRequest(queryId, csrf, txnId, cursor) {
+  const variables = {
+    count: 100,
+    includePromotedContent: false,
+    withClientEventToken: false,
+    withBirdwatchNotes: false,
+    withVoice: true,
+    withV2Timeline: true,
+    ...(cursor ? { cursor } : {}),
+  };
+
+  const url =
+    `${GQL_URL}/${queryId}/${BOOKMARKS_OP}` +
+    `?variables=${encodeURIComponent(JSON.stringify(variables))}` +
+    `&features=${encodeURIComponent(JSON.stringify(FEATURES))}`;
+
+  const headers = {
+    authorization: `Bearer ${WEB_CLIENT_BEARER}`,
+    'x-csrf-token': csrf,
+    'x-twitter-auth-type': 'OAuth2Session',
+    'x-twitter-active-user': 'yes',
+    'x-twitter-client-language': 'en',
+    'content-type': 'application/json',
+    Referer: 'https://x.com/i/bookmarks',
+    Origin: 'https://x.com',
+  };
+  if (txnId) headers['x-client-transaction-id'] = txnId;
+
+  return fetch(url, { method: 'GET', headers, credentials: 'include' });
+}
+
+function timelineInstructions(payload) {
+  const d = payload && payload.data;
+  if (!d) return [];
+  return [
+    d.bookmark_timeline?.timeline?.instructions,
+    d.bookmark_timeline_v2?.timeline?.instructions,
+    d.user?.result?.timeline?.timeline?.instructions,
+    d.user?.result?.timeline?.instructions,
+  ].find(Array.isArray) || [];
+}
+
+function extractEntries(payload) {
+  for (const ins of timelineInstructions(payload)) {
+    if (ins.type === 'TimelineAddEntries' && Array.isArray(ins.entries)) return ins.entries;
+  }
+  return [];
+}
+
+function nextCursor(payload) {
+  const entries = extractEntries(payload);
+  const bottom = [...entries]
+    .reverse()
+    .find((e) => String(e.entryId || '').startsWith('cursor-bottom'));
+  return (bottom && bottom.content && bottom.content.value) || null;
+}
+
+function parseEntries(entries) {
+  const bookmarks = [];
+  const users = {};
+
+  for (const entry of entries) {
+    if (!entry || !String(entry.entryId || '').startsWith('tweet-')) continue;
+    try {
+      const item = entry.content?.itemContent || entry.content?.item?.itemContent;
+      const result = item?.tweet_results?.result;
+      if (!result) continue;
+      if (result.__typename === 'TweetTombstone') continue;
+
+      const tweetId = result.rest_id || result.legacy?.id_str;
+      if (!tweetId) continue;
+
+      const userRes = result.core?.user_results?.result || result.user;
+      if (!userRes) continue;
+
+      const userId = userRes.rest_id || userRes.id_str;
+      const handle = userRes.legacy?.screen_name || userRes.screen_name;
+      if (!userId || !handle) continue;
+
+      const legacy = result.legacy || {};
+      const text =
+        legacy.full_text ||
+        result.note_tweet?.note_tweet_results?.result?.text ||
+        result.full_text ||
+        '';
+
+      users[userId] = {
+        id: userId,
+        username: handle,
+        displayName: userRes.legacy?.name || userRes.name || handle,
+        profileImage:
+          userRes.legacy?.profile_image_url_https || userRes.profile_image_url_https || '',
+        verified: !!(userRes.is_blue_verified || userRes.legacy?.verified),
+      };
+
+      bookmarks.push({
+        id: tweetId,
+        userId,
+        text,
+        created_at: legacy.created_at || result.created_at || null,
+        media: legacy.entities?.media || [],
+        likes: legacy.favorite_count || 0,
+        retweets: legacy.retweet_count || 0,
+        replies: legacy.reply_count || 0,
+        url: `https://x.com/${handle}/status/${tweetId}`,
+      });
+    } catch (err) {
+      console.warn('[xbm] entry parse failed', err);
+    }
+  }
+
+  return { bookmarks, users };
+}
+
+async function fetchBookmarks() {
+  const cookies = await getCookies();
+
+  if (!cookies.authToken) {
+    throw new XbmError('Not signed in to X. Open x.com in a tab and log in, then retry.', 'NO_SESSION');
+  }
+  if (!cookies.csrf) {
+    throw new XbmError('CSRF token (ct0) missing. Reload x.com while signed in, then retry.', 'NO_CSRF');
+  }
+
+  const stored = await chrome.storage.local.get([STORE.queryId, STORE.txnId]);
+  const override = stored[STORE.queryId];
+  const ids = override
+    ? [override, ...BOOKMARKS_QUERY_IDS.filter((i) => i !== override)]
+    : [...BOOKMARKS_QUERY_IDS];
+
+  const txnId = stored[STORE.txnId] || null;
+  let lastError = null;
+
+  for (const queryId of ids) {
+    const collected = [];
+    const users = {};
+    let cursor = null;
+    let accepted = false;
+
+    try {
+      for (let page = 0; page < MAX_PAGES; page++) {
+        const res = await gqlRequest(queryId, cookies.csrf, txnId, cursor);
+
+        if (res.status === 404) {
+          lastError = new XbmError(`queryId ${queryId} returned 404 (rotated)`, 'STALE_QUERY_ID');
+          break;
+        }
+        if (res.status === 429) {
+          throw new XbmError('Rate limited by X. Wait a few minutes and retry.', 'RATE_LIMITED');
+        }
+        if (res.status === 401 || res.status === 403) {
+          throw new XbmError(
+            `X rejected the session (HTTP ${res.status}). Sign in to x.com again, then retry.`,
+            'SESSION_REJECTED'
+          );
+        }
+        if (!res.ok) {
+          throw new XbmError(`X returned HTTP ${res.status}`, 'HTTP_ERROR');
+        }
+
+        const payload = await res.json();
+        if (payload.errors?.length) {
+          throw new XbmError(
+            `X returned errors: ${payload.errors.map((e) => e.message).join('; ')}`,
+            'GQL_ERROR'
+          );
+        }
+
+        const parsed = parseEntries(extractEntries(payload));
+        collected.push(...parsed.bookmarks);
+        Object.assign(users, parsed.users);
+        accepted = true;
+
+        cursor = nextCursor(payload);
+        if (!cursor) break;
+      }
+    } catch (err) {
+      if (err instanceof XbmError && err.code === 'STALE_QUERY_ID') continue;
+      throw err;
+    }
+
+    if (!accepted) continue;
+
+    const seen = new Set();
+    const bookmarks = collected.filter((b) => {
+      if (!b || !b.id || seen.has(b.id)) return false;
+      seen.add(b.id);
+      return true;
+    });
+
+    await chrome.storage.local.set({
+      [STORE.bookmarks]: bookmarks,
+      [STORE.users]: users,
+      [STORE.lastUpdated]: Date.now(),
+      [STORE.bookmarkCount]: bookmarks.length,
+    });
+
+    console.log(`[xbm] ${bookmarks.length} bookmarks via ${queryId}`);
+    return { count: bookmarks.length, queryId };
+  }
+
+  throw lastError || new XbmError('All known query IDs were rejected.', 'STALE_QUERY_ID');
+}
+
+// ------------------------------------------------------------------ alarms
+
 chrome.alarms.create('refreshBookmarks', { periodInMinutes: 240 });
 chrome.alarms.onAlarm.addListener((alarm) => {
-  if (alarm.name === 'refreshBookmarks') {
-    chrome.storage.local.get('enabled', data => {
-      if (data.enabled) {
-        console.log('Scheduled bookmark refresh triggered');
-        fetchBookmarks()
-          .then(result => console.log(`Scheduled refresh complete: ${result.length} bookmarks`))
-          .catch(err => console.error('Error in scheduled refresh:', err));
-      }
-    });
-  }
+  if (alarm.name !== 'refreshBookmarks') return;
+  chrome.storage.local.get(STORE.enabled).then((d) => {
+    if (d[STORE.enabled]) {
+      fetchBookmarks().catch((err) => console.warn('[xbm] scheduled refresh failed', err));
+    }
+  });
 });

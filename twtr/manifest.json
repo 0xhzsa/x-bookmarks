@@ -1,16 +1,17 @@
 {
   "manifest_version": 3,
-  "name": "X Bookmarks Feed Integration",
-  "version": "1.0",
-  "description": "Integrates your bookmarked posts into your X feed",
+  "name": "X Bookmarks Feed",
+  "version": "2.0",
+  "description": "Surfaces your X bookmarks inside your home timeline.",
   "permissions": [
     "storage",
     "cookies",
     "alarms"
   ],
   "host_permissions": [
+    "https://x.com/*",
     "https://twitter.com/*",
-    "https://x.com/*"
+    "https://abs.twimg.com/*"
   ],
   "action": {
     "default_popup": "popup.html",
@@ -26,7 +27,7 @@
   },
   "content_scripts": [
     {
-      "matches": ["https://twitter.com/*", "https://x.com/*"],
+      "matches": ["https://x.com/*", "https://twitter.com/*"],
       "js": ["content.js"],
       "css": ["styles.css"]
     }

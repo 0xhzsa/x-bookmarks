@@ -1,39 +1,57 @@
-<!-- popup.html -->
 <!DOCTYPE html>
 <html>
 <head>
-  <title>X Bookmarks Feed Integration</title>
-  <link rel="stylesheet" type="text/css" href="styles.css">
+  <meta charset="utf-8">
+  <title>X Bookmarks Feed</title>
   <style>
     body {
       width: 300px;
-      font-family: Arial, sans-serif;
-      padding: 10px;
+      margin: 0;
+      padding: 14px;
+      font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
+      color: #0f1419;
+      background: #fff;
     }
-    .container {
-      display: flex;
-      flex-direction: column;
-      gap: 15px;
+    h2 {
+      margin: 0;
+      font-size: 15px;
+      font-weight: 700;
+      letter-spacing: -0.01em;
     }
     .header {
       display: flex;
       align-items: center;
       justify-content: space-between;
+      margin-bottom: 14px;
     }
-    .header h2 {
-      margin: 0;
-      color: #1DA1F2;
+    .group {
+      border: 1px solid #e6e6e6;
+      border-radius: 12px;
+      padding: 4px 12px 10px;
+      margin-bottom: 12px;
     }
-    .toggle-container {
+    .row {
       display: flex;
       align-items: center;
       justify-content: space-between;
+      padding: 8px 0 0;
+      font-size: 13px;
+    }
+    select {
+      font: inherit;
+      font-size: 13px;
+      padding: 4px 8px;
+      border: 1px solid #d0d0d0;
+      border-radius: 8px;
+      background: #fff;
+      color: #0f1419;
     }
     .toggle {
       position: relative;
       display: inline-block;
-      width: 50px;
-      height: 24px;
+      width: 40px;
+      height: 22px;
+      flex: 0 0 40px;
     }
     .toggle input {
       opacity: 0;
@@ -42,98 +60,141 @@
     }
     .slider {
       position: absolute;
+      inset: 0;
+      background: #c9c9c9;
+      border-radius: 22px;
+      transition: 0.2s;
       cursor: pointer;
-      top: 0;
-      left: 0;
-      right: 0;
-      bottom: 0;
-      background-color: #ccc;
-      transition: .4s;
-      border-radius: 24px;
     }
-    .slider:before {
-      position: absolute;
+    .slider::before {
       content: "";
+      position: absolute;
       height: 16px;
       width: 16px;
-      left: 4px;
-      bottom: 4px;
-      background-color: white;
-      transition: .4s;
+      left: 3px;
+      bottom: 3px;
+      background: #fff;
       border-radius: 50%;
+      transition: 0.2s;
     }
     input:checked + .slider {
-      background-color: #1DA1F2;
+      background: #1d9bf0;
     }
-    input:checked + .slider:before {
-      transform: translateX(26px);
-    }
-    .settings-group {
-      border: 1px solid #eee;
-      border-radius: 8px;
-      padding: 10px;
+    input:checked + .slider::before {
+      transform: translateX(18px);
     }
     button {
-      background-color: #1DA1F2;
-      color: white;
-      border: none;
+      width: 100%;
+      font: inherit;
+      font-size: 13px;
+      font-weight: 600;
       padding: 8px 12px;
-      border-radius: 4px;
+      border: none;
+      border-radius: 8px;
+      background: #1d9bf0;
+      color: #fff;
       cursor: pointer;
     }
     button:hover {
-      background-color: #0c85d0;
+      background: #1a8cd8;
+    }
+    button:disabled {
+      opacity: 0.6;
+      cursor: default;
     }
     .status {
+      margin: 10px 0 0;
       font-size: 12px;
-      color: #555;
+      line-height: 1.5;
+      color: #536471;
+    }
+    .status.error {
+      color: #c0392b;
+    }
+    .status.ok {
+      color: #157347;
+    }
+    .advanced {
+      margin-top: 12px;
+      font-size: 12px;
+      color: #536471;
+    }
+    .advanced input {
+      width: 100%;
+      box-sizing: border-box;
+      margin-top: 4px;
+      padding: 5px 7px;
+      font: inherit;
+      font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+      font-size: 11px;
+      border: 1px solid #d0d0d0;
+      border-radius: 6px;
+    }
+    .debug {
+      display: none;
+      margin-top: 10px;
+      padding: 9px;
+      background: #f5f5f5;
+      border-radius: 8px;
+      font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+      font-size: 10.5px;
+      white-space: pre-wrap;
+      line-height: 1.5;
     }
   </style>
 </head>
 <body>
-  <div class="container">
-    <div class="header">
-      <h2>X Bookmarks Feed</h2>
-      <div class="toggle-container">
-        <label class="toggle">
-          <input type="checkbox" id="extension-toggle">
-          <span class="slider"></span>
-        </label>
-      </div>
-    </div>
-    
-    <div class="settings-group">
-      <div class="toggle-container">
-        <span>Show bookmark indicator</span>
-        <label class="toggle">
-          <input type="checkbox" id="indicator-toggle" checked>
-          <span class="slider"></span>
-        </label>
-      </div>
-      
-      <div class="toggle-container">
-        <span>Bookmark frequency</span>
-        <select id="frequency" style="font-family: 'Helvetica Neue', sans-serif; border: 1px solid #ccc; border-radius: 5px; padding: 10px; background-color: #fff; color: #333;">
-          <option value="daily">Daily</option>
-          <option value="weekly" selected>Weekly</option>
-          <option value="monthly">Monthly</option>
-        </select>
-      </div>
-      
-      <div class="toggle-container">
-        <span>Prioritize recent bookmarks</span>
-        <label class="toggle">
-          <input type="checkbox" id="recent-toggle" checked>
-          <span class="slider"></span>
-        </label>
-      </div>
-    </div>
-    
-    <button id="refresh-bookmarks">Refresh Bookmarks Cache</button>
-    
-    <p class="status">Last updated: <span id="last-updated">Never</span></p>
-    <p class="status" id="bookmark-count">0 bookmarks loaded</p>
+  <div class="header">
+    <h2>X Bookmarks</h2>
+    <label class="toggle">
+      <input type="checkbox" id="extension-toggle">
+      <span class="slider"></span>
+    </label>
   </div>
+
+  <div class="group">
+    <div class="row">
+      <span>Show bookmark rail</span>
+      <label class="toggle">
+        <input type="checkbox" id="rail-toggle" checked>
+        <span class="slider"></span>
+      </label>
+    </div>
+    <div class="row">
+      <span>Mark bookmarked tweets</span>
+      <label class="toggle">
+        <input type="checkbox" id="indicator-toggle" checked>
+        <span class="slider"></span>
+      </label>
+    </div>
+    <div class="row">
+      <span>Rail size</span>
+      <select id="frequency">
+        <option value="low">Compact</option>
+        <option value="medium" selected>Standard</option>
+        <option value="high">Roomier</option>
+      </select>
+    </div>
+    <div class="row">
+      <span>Prioritize recent</span>
+      <label class="toggle">
+        <input type="checkbox" id="recent-toggle" checked>
+        <span class="slider"></span>
+      </label>
+    </div>
+  </div>
+
+  <button id="refresh-bookmarks">Refresh Bookmarks</button>
+  <p class="status" id="status">Not loaded yet.</p>
+
+  <div class="advanced">
+    <label for="queryid">Query ID override (leave blank to auto-rotate)</label>
+    <input id="queryid" type="text" spellcheck="false" autocomplete="off">
+    <button id="save-queryid" style="margin-top:6px; background:#536471;">Save</button>
+    <button id="debug-toggle" style="margin-top:6px; background:#536471;">Debug Info</button>
+  </div>
+  <div class="debug" id="debug"></div>
+
   <script src="popup.js"></script>
 </body>
 </html>
