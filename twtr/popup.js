@@ -86,7 +86,16 @@ document.addEventListener('DOMContentLoaded', function () {
           });
         });
       } else {
-        setStatus(response.error || 'Sync failed.', 'error');
+        let error = response.error || 'Sync failed.';
+        // Add guidance for common errors
+        if (response.code === 'SESSION_REJECTED') {
+          error += '\n\n⚠️ X rejected authentication. Try:\n1. Log out of x.com and log back in\n2. Reload this popup\n3. Click Refresh again';
+        } else if (response.code === 'NO_SESSION') {
+          error += '\n\n⚠️ No X session found. Open x.com in a tab and log in first.';
+        } else if (response.code === 'NO_CSRF') {
+          error += '\n\n⚠️ CSRF token missing. Reload x.com while logged in.';
+        }
+        setStatus(error, 'error');
       }
     });
   });
@@ -119,7 +128,7 @@ document.addEventListener('DOMContentLoaded', function () {
         `txn id: ${d.storage.txnId}`,
         '',
         '— QUERY ID CANDIDATES —',
-        d.candidates.join('\n'),
+        ...d.candidates,
       ];
       debugBox.textContent = lines.join('\n');
     });
