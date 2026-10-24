@@ -165,8 +165,22 @@ async function gqlRequest(queryId, csrf, txnId, cursor, authToken) {
     "?variables=" + encodeURIComponent(JSON.stringify(variables)) +
     "&features=" + encodeURIComponent(JSON.stringify(FEATURES));
 
-  // Use user's auth token as Bearer (more reliable than static token)
-  const bearerToken = authToken || WEB_CLIENT_BEARER;
+  // Prepare Bearer token - try auth_token, fallback to static web bearer
+  // auth_token is often base64-encoded and needs to be used directly as OAuth token
+  let bearerToken = "";
+  if (authToken) {
+    try {
+      // URL decode if needed (cookie values are often URL-encoded)
+      bearerToken = decodeURIComponent(authToken);
+      console.log("[xbm] using session auth token:", bearerToken.substring(0, 20) + "...");
+    } catch (e) {
+      bearerToken = authToken;
+    }
+  }
+  if (!bearerToken) {
+    bearerToken = WEB_CLIENT_BEARER;
+    console.log("[xbm] using static web client bearer");
+  }
   
   const headers = {
     authorization: "Bearer " + bearerToken,
