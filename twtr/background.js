@@ -2,14 +2,15 @@
 const GQL_URL = "https://x.com/i/api/graphql";
 const BOOKMARKS_OP = "Bookmarks";
 
+const WEB_CLIENT_BEARER =
+  "AAAAAAAAAAAAAAAAAAAAANRILgAAAAAAnNwIzUejRCOuH5E6I8xnZz4puTs%3D1Zv7ttfk8LF81IUq16cHjhLTvJu4FA33AGWWjCpTnA";
+
+// Known query IDs - will try these first, then discover more dynamically
 const BOOKMARKS_QUERY_IDS = [
   "vvgIHIejOsbp0Dn5KytkZg",
   "qToeLeMs43Q8cr7tRYXmaQ",
   "zZXycP0V6H7m-2r0ZW0h9A",
 ];
-
-const WEB_CLIENT_BEARER =
-  "AAAAAAAAAAAAAAAAAAAAANRILgAAAAAAnNwIzUejRCOuH5E6I8xnZz4puTs%3D1Zv7ttfk8LF81IUq16cHjhLTvJu4FA33AGWWjCpTnA";
 
 const STORE = {
   enabled: "enabled",
@@ -48,6 +49,40 @@ const FEATURES = {
 };
 
 const MAX_PAGES = 5;
+
+// Dynamic query ID discovery - scrapes X's JS bundles
+async function discoverQueryIds() {
+  const discovered = [];
+  try {
+    // Try to fetch page HTML which contains GraphQL query IDs
+    const res = await fetch("https://x.com/i/bookmarks", {
+      headers: {
+        "x-twitter-active-user": "yes",
+        "user-agent": navigator.userAgent,
+      },
+    });
+    
+    // Look for query IDs in the response (they look like long base64-alphanumeric strings)
+    const text = await res.text();
+    const idPattern = /[A-Za-z0-9_-]{20,30}/g;
+    const matches = text.match(idPattern) || [];
+    
+    for (const id of matches) {
+      // Verify it's a valid query ID by making a test request
+      try {
+        const testRes = await gqlRequest(id, "test", null, null, null);
+        // 200 means valid, 404/401 means invalid/rate limited
+        if (testRes.status === 200) {
+          discovered.push(id);
+          console.log("[xbm] discovered query ID:", id);
+        }
+      } catch (e) {}
+    }
+  } catch (e) {
+    console.log("[xbm] query discovery failed:", e.message);
+  }
+  return discovered;
+}
 
 chrome.runtime.onInstalled.addListener(() => {
   chrome.storage.local.set({
@@ -166,16 +201,15 @@ async function gqlRequest(queryId, csrf, txnId, cursor, authToken) {
     "&features=" + encodeURIComponent(JSON.stringify(FEATURES));
 
   // Prepare Bearer token - try auth_token, fallback to static web bearer
-  // auth_token is often base64-encoded and needs to be used directly as OAuth token
+  // auth_token is URL-encoded from cookie, decode it first
   let bearerToken = "";
   if (authToken) {
     try {
-      // URL decode if needed (cookie values are often URL-encoded)
       bearerToken = decodeURIComponent(authToken);
-      console.log("[xbm] using session auth token:", bearerToken.substring(0, 20) + "...");
     } catch (e) {
       bearerToken = authToken;
     }
+    console.log("[xbm] using session auth token:", bearerToken.substring(0, 30) + (bearerToken.length > 30 ? "..." : ""));
   }
   if (!bearerToken) {
     bearerToken = WEB_CLIENT_BEARER;
@@ -189,6 +223,7 @@ async function gqlRequest(queryId, csrf, txnId, cursor, authToken) {
     "x-twitter-active-user": "yes",
     "x-twitter-client-language": "en",
     "content-type": "application/json",
+    "x-requested-with": "XMLHttpRequest",
     Referer: "https://x.com/i/bookmarks",
     Origin: "https://x.com",
   };
