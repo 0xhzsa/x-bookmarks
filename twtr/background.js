@@ -1,5 +1,4 @@
 // background.js — X Bookmarks Feed v2
-
 const GQL_URL = "https://x.com/i/api/graphql";
 const BOOKMARKS_OP = "Bookmarks";
 
@@ -150,7 +149,7 @@ class XbmError extends Error {
   }
 }
 
-async function gqlRequest(queryId, csrf, txnId, cursor) {
+async function gqlRequest(queryId, csrf, txnId, cursor, authToken) {
   const variables = {
     count: 100,
     includePromotedContent: false,
@@ -166,8 +165,11 @@ async function gqlRequest(queryId, csrf, txnId, cursor) {
     "?variables=" + encodeURIComponent(JSON.stringify(variables)) +
     "&features=" + encodeURIComponent(JSON.stringify(FEATURES));
 
+  // Use user's auth token as Bearer (more reliable than static token)
+  const bearerToken = authToken || WEB_CLIENT_BEARER;
+  
   const headers = {
-    authorization: "Bearer " + WEB_CLIENT_BEARER,
+    authorization: "Bearer " + bearerToken,
     "x-csrf-token": csrf,
     "x-twitter-auth-type": "OAuth2Session",
     "x-twitter-active-user": "yes",
@@ -181,7 +183,17 @@ async function gqlRequest(queryId, csrf, txnId, cursor) {
   return fetch(url, { method: "GET", headers, credentials: "include" });
 }
 
-// twscrape-style deep scan
+function deepGet(obj, path) {
+  if (!path) return obj;
+  const parts = path.split(".");
+  let cur = obj;
+  for (const p of parts) {
+    if (cur == null) return undefined;
+    cur = cur[p];
+  }
+  return cur;
+}
+
 function getTypedObject(obj) {
   const result = {};
   function walk(o) {
@@ -199,31 +211,66 @@ function getTypedObject(obj) {
   return result;
 }
 
-function deepGet(obj, path) {
-  if (!path) return obj;
-  const parts = path.split(".");
-  let cur = obj;
-  for (const p of parts) {
-    if (cur == null) return undefined;
-    cur = cur[p];
+function extractEntries(payload, typed) {
+  if (typed && typed.TimelineAddEntries && typed.TimelineAddEntries[0]) {
+    const entries = typed.TimelineAddEntries[0].entries;
+    if (entries && entries.length > 0) return entries;
   }
-  return cur;
+  
+  const pathCandidates = [
+    ["data", "bookmark_timeline_v2", "timeline", "instructions"],
+    ["data", "bookmark_timeline", "timeline", "instructions"],
+    ["data", "user", "result", "timeline", "timeline", "instructions"],
+    ["data", "user", "result", "timeline", "instructions"],
+  ];
+  
+  for (const path of pathCandidates) {
+    const instructions = deepGet(payload, path.join("."));
+    if (Array.isArray(instructions)) {
+      for (const instr of instructions) {
+        if (instr && instr.entries && instr.entries.length > 0) {
+          return instr.entries;
+        }
+      }
+    }
+  }
+  
+  return [];
 }
 
-function extractEntries(typed) {
-  return typed.TimelineAddEntries && typed.TimelineAddEntries[0] ? typed.TimelineAddEntries[0].entries : [];
-}
-
-function nextCursor(payload) {
-  const typed = getTypedObject(payload);
-  const entries = extractEntries(typed);
-  const bottom = entries.slice().reverse().find((e) => String(e.entryId || "").startsWith("cursor-bottom"));
-  return (bottom && bottom.content && bottom.content.value) || null;
+function nextCursor(payload, typed) {
+  const entries = extractEntries(payload, typed);
+  if (entries.length > 0) {
+    const bottom = entries.slice().reverse().find((e) => String(e.entryId || "").startsWith("cursor-bottom"));
+    if (bottom && bottom.content && bottom.content.value) return bottom.content.value;
+  }
+  
+  const pathCandidates = [
+    ["data", "bookmark_timeline_v2", "timeline", "instructions"],
+    ["data", "bookmark_timeline", "timeline", "instructions"],
+  ];
+  
+  for (const path of pathCandidates) {
+    const instructions = deepGet(payload, path.join("."));
+    if (Array.isArray(instructions)) {
+      for (const instr of instructions) {
+        if (instr && instr.entries) {
+          const bottom = instr.entries.slice().reverse().find((e) => String(e.entryId || "").startsWith("cursor-bottom"));
+          if (bottom && bottom.content && bottom.content.value) return bottom.content.value;
+        }
+      }
+    }
+  }
+  
+  return null;
 }
 
 function findUser(node) {
   if (!node) return null;
-  const userRes = node.core && node.core.user_results && node.core.user_results.result ? node.core.user_results.result : (node.user && node.user.results && node.user.results.found && node.user.results.found[0] ? node.user.results.found[0] : node.user);
+  const userRes = node.core && node.core.user_results && node.core.user_results.result 
+    ? node.core.user_results.result 
+    : (node.user && node.user.results && node.user.results.found && node.user.results.found[0] 
+       ? node.user.results.found[0] : node.user);
   if (!userRes) return null;
   const userId = userRes.rest_id || userRes.id_str;
   const handle = userRes.legacy && userRes.legacy.screen_name ? userRes.legacy.screen_name : userRes.screen_name;
@@ -232,7 +279,8 @@ function findUser(node) {
     id: userId,
     username: handle,
     displayName: (userRes.legacy && userRes.legacy.name) || (userRes.name ? userRes.name : null) || handle,
-    profileImage: (userRes.legacy && userRes.legacy.profile_image_url_https) || (userRes.profile_image_url_https ? userRes.profile_image_url_https : null) || "",
+    profileImage: (userRes.legacy && userRes.legacy.profile_image_url_https) 
+      || (userRes.profile_image_url_https ? userRes.profile_image_url_https : null) || "",
     verified: !!(userRes.is_blue_verified || (userRes.legacy && userRes.legacy.verified)),
   };
 }
@@ -290,7 +338,9 @@ function parseEntries(entries, typed) {
   for (const entry of entries) {
     if (!entry || !String(entry.entryId || "").startsWith("tweet-")) continue;
     try {
-      const item = entry.content && entry.content.itemContent ? entry.content.itemContent : (entry.content && entry.content.item && entry.content.item.itemContent ? entry.content.item.itemContent : null);
+      const item = entry.content && entry.content.itemContent 
+        ? entry.content.itemContent 
+        : (entry.content && entry.content.item && entry.content.item.itemContent ? entry.content.item.itemContent : null);
       if (!item) continue;
 
       const tweetResults = item.tweet_results;
@@ -301,7 +351,8 @@ function parseEntries(entries, typed) {
       const tweetId = result.rest_id || (result.legacy && result.legacy.id_str ? result.legacy.id_str : null);
       if (!tweetId) continue;
 
-      const userRes = (result.core && result.core.user_results && result.core.user_results.result ? result.core.user_results.result : null) || (result.user ? result.user : null);
+      const userRes = (result.core && result.core.user_results && result.core.user_results.result 
+        ? result.core.user_results.result : null) || (result.user ? result.user : null);
       if (!userRes) continue;
 
       const userId = userRes.rest_id || userRes.id_str;
@@ -366,7 +417,7 @@ async function fetchBookmarks() {
 
     try {
       for (let page = 0; page < MAX_PAGES; page++) {
-        const res = await gqlRequest(queryId, cookies.csrf, txnId, cursor);
+        const res = await gqlRequest(queryId, cookies.csrf, txnId, cursor, cookies.authToken);
 
         if (res.status === 404) {
           lastError = new XbmError("queryId " + queryId + " returned 404 (rotated)", "STALE_QUERY_ID");
@@ -388,13 +439,14 @@ async function fetchBookmarks() {
         }
 
         const typed = getTypedObject(payload);
-        const entries = extractEntries(typed);
+        const entries = extractEntries(payload, typed);
         const parsed = parseEntries(entries, typed);
+        
         for (const b of parsed.bookmarks) collected.push(b);
         for (const uid of Object.keys(parsed.users)) users[uid] = parsed.users[uid];
         accepted = true;
 
-        cursor = nextCursor(payload);
+        cursor = nextCursor(payload, typed);
         if (!cursor) break;
       }
     } catch (err) {
