@@ -516,8 +516,33 @@ async function runSync(opts = {}) {
 
     if (!bookmarks.length) {
       // Almost always a transient X hiccup, or an account that really has no
-      // bookmarks. Never let a blank response wipe a good cache.
+      // bookmarks. Never let one blank response wipe a good cache. But blank is
+      // also what "I removed every save" looks like, and returning early
+      // forever would keep those posts resurfacing with no way to retire them:
+      // so it is recorded, and the next full pass that returns the same nothing
+      // clears the cache.
       if (existing.length) {
+        // Only a walk that reached the end of the list proves the library is
+        // empty. An empty page that still carries a cursor is a hiccup.
+        const emptyComplete = full && !truncated && !cursor;
+        const sameNothing =
+          !!pending && pending.count === 0 && Date.now() - (pending.at || 0) < 2 * FULL_SYNC_MS;
+        if (emptyComplete && sameNothing) {
+          await chrome.storage.local.set({
+            [STORE.bookmarks]: [],
+            [STORE.users]: {},
+            [STORE.bookmarkCount]: 0,
+            [STORE.lastUpdated]: Date.now(),
+            [STORE.discovered]: queryId,
+            [STORE.lastFullSync]: Date.now(),
+            [STORE.pendingFull]: null,
+          });
+          console.log("[xbm] bookmarks list is empty twice — cache cleared");
+          return { count: 0, queryId, pages, full, truncated };
+        }
+        if (emptyComplete) {
+          await chrome.storage.local.set({ [STORE.pendingFull]: { count: 0, at: Date.now() } });
+        }
         return { count: existing.length, queryId, unchanged: true, full };
       }
     }
@@ -563,7 +588,9 @@ async function runSync(opts = {}) {
       ? { count: bookmarks.length, at: Date.now() }
       : authoritative
         ? null
-        : pending || null;
+        : pending && pending.count > 0
+          ? pending
+          : null;
 
     await chrome.storage.local.set({
       [STORE.bookmarks]: merged,
