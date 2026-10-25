@@ -25,7 +25,8 @@ else ok('manifest_version 3');
 if (!/^\d+\.\d+(\.\d+)?$/.test(manifest.version)) fail('version is not semver: ' + manifest.version);
 else ok('version ' + manifest.version);
 
-const tag = (process.env.GITHUB_REF_NAME || '').replace(/^v/, '');
+const tag =
+  process.env.GITHUB_REF_TYPE === 'tag' ? (process.env.GITHUB_REF_NAME || '').replace(/^v/, '') : '';
 if (tag && tag !== manifest.version) {
   fail(`tag ${tag} does not match manifest version ${manifest.version}`);
 } else if (tag) {
