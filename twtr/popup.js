@@ -26,20 +26,32 @@ document.addEventListener('DOMContentLoaded', function () {
   // only copies it, and the button restores the address so it stays verifiable.
   if (donateBtn) {
     const ADDRESS = '0xe75fe7492D16dB9f133dA20De2F2a1AA68406977';
+    const restore = () => {
+      donateBtn.textContent = ADDRESS;
+    };
+    // If the clipboard is unavailable the address stays selectable, so the
+    // keyboard still works instead of the click doing nothing.
+    const select = () => {
+      restore();
+      try {
+        const range = document.createRange();
+        range.selectNodeContents(donateBtn);
+        const sel = window.getSelection();
+        sel.removeAllRanges();
+        sel.addRange(range);
+      } catch (e) {}
+    };
     donateBtn.addEventListener('click', () => {
-      const restore = () => {
-        donateBtn.textContent = ADDRESS;
-      };
       try {
         navigator.clipboard.writeText(ADDRESS).then(
           () => {
             donateBtn.textContent = 'Copied — thank you';
             setTimeout(restore, 1600);
           },
-          restore
+          select
         );
       } catch (e) {
-        restore();
+        select();
       }
     });
   }
