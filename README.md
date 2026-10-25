@@ -15,6 +15,8 @@ request x.com already makes, stores them on your machine, and resurfaces them wh
   <img alt="platform" src="https://img.shields.io/badge/Chrome%20%2F%20Edge-111%2B-536471">
 </p>
 
+![A saved post reappearing between two posts in the Home timeline](docs/demo.gif)
+
 ---
 
 ## Install
