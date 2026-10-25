@@ -107,6 +107,7 @@
       font-size: 12px;
       line-height: 1.5;
       color: #536471;
+      white-space: pre-line;
     }
     .status.error {
       color: #c0392b;
@@ -114,10 +115,29 @@
     .status.ok {
       color: #157347;
     }
+    .status.feed {
+      margin-top: 4px;
+      font-size: 11px;
+    }
+    .version {
+      font-size: 10px;
+      font-weight: 600;
+      color: #8b98a5;
+      margin-left: 4px;
+    }
     .advanced {
       margin-top: 12px;
       font-size: 12px;
       color: #536471;
+    }
+    .advanced summary {
+      cursor: pointer;
+      font-weight: 600;
+      color: #536471;
+      outline: none;
+    }
+    .advanced[open] summary {
+      margin-bottom: 6px;
     }
     .advanced input {
       width: 100%;
@@ -141,11 +161,43 @@
       white-space: pre-wrap;
       line-height: 1.5;
     }
+    .support {
+      margin-top: 14px;
+      padding-top: 10px;
+      border-top: 1px solid #eff3f4;
+      font-size: 11px;
+      line-height: 1.5;
+      color: #8b98a5;
+    }
+    .support p {
+      margin: 0 0 6px;
+    }
+    .donate {
+      display: block;
+      width: 100%;
+      box-sizing: border-box;
+      padding: 6px 8px;
+      border: 1px solid #e6e6e6;
+      border-radius: 8px;
+      background: #f7f9f9;
+      color: #0f1419;
+      font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+      font-size: 10.5px;
+      font-weight: 500;
+      line-height: 1.4;
+      text-align: center;
+      word-break: break-all;
+      cursor: pointer;
+    }
+    .donate:hover {
+      background: #eff3f4;
+      border-color: #d0d0d0;
+    }
   </style>
 </head>
 <body>
   <div class="header">
-    <h2>X Bookmarks</h2>
+    <h2>X Bookmarks <span class="version" id="version"></span></h2>
     <label class="toggle">
       <input type="checkbox" id="extension-toggle">
       <span class="slider"></span>
@@ -169,10 +221,18 @@
     </div>
     <div class="row">
       <span>Rail size</span>
+      <select id="rail-size">
+        <option value="compact">Compact</option>
+        <option value="standard" selected>Standard</option>
+        <option value="roomy">Roomy</option>
+      </select>
+    </div>
+    <div class="row">
+      <span>Sync every</span>
       <select id="frequency">
-        <option value="low">Compact</option>
-        <option value="medium" selected>Standard</option>
-        <option value="high">Roomier</option>
+        <option value="high">1 hour</option>
+        <option value="medium" selected>4 hours</option>
+        <option value="low">12 hours</option>
       </select>
     </div>
     <div class="row">
@@ -182,18 +242,48 @@
         <span class="slider"></span>
       </label>
     </div>
+    <div class="row">
+      <span>Resurface in timeline</span>
+      <label class="toggle">
+        <input type="checkbox" id="inject-toggle" checked>
+        <span class="slider"></span>
+      </label>
+    </div>
+    <div class="row">
+      <span>Every</span>
+      <select id="inject-every">
+        <option value="6">6 posts</option>
+        <option value="10" selected>10 posts</option>
+        <option value="20">20 posts</option>
+      </select>
+    </div>
+    <div class="row">
+      <span>Which bookmark</span>
+      <select id="inject-mode">
+        <option value="smart" selected>Related, else backlog</option>
+        <option value="related">Only related</option>
+        <option value="rotate">Next in backlog</option>
+      </select>
+    </div>
   </div>
 
   <button id="refresh-bookmarks">Refresh Bookmarks</button>
   <p class="status" id="status">Not loaded yet.</p>
+  <p class="status feed" id="feed-status"></p>
 
-  <div class="advanced">
-    <label for="queryid">Query ID override (leave blank to auto-rotate)</label>
+  <details class="advanced">
+    <summary>Advanced</summary>
+    <label for="queryid">Query ID override (leave blank — auto-detected)</label>
     <input id="queryid" type="text" spellcheck="false" autocomplete="off">
     <button id="save-queryid" style="margin-top:6px; background:#536471;">Save</button>
     <button id="debug-toggle" style="margin-top:6px; background:#536471;">Debug Info</button>
-  </div>
+  </details>
   <div class="debug" id="debug"></div>
+
+  <div class="support">
+    <p>Free. No account, no server, no tracking. If it earns a place in your feed:</p>
+    <button id="donate" class="donate" title="Copy ETH address">0xe75fe7492D16dB9f133dA20De2F2a1AA68406977</button>
+  </div>
 
   <script src="popup.js"></script>
 </body>

@@ -1,0 +1,10 @@
+# Development files — not part of the published extension.
+
+node_modules/
+dist/
+store/
+test/
+*.zip
+*.log
+.DS_Store
+Thumbs.db

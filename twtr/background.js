@@ -1,29 +1,30 @@
-// background.js — X Bookmarks Feed v2
-const GQL_URL = "https://x.com/i/api/graphql";
-const BOOKMARKS_OP = "Bookmarks";
+// background.js — X Bookmarks Feed v3
+//
+// Reads your own bookmarks through X's internal web GraphQL API using the
+// browser's existing logged-in session. No API key, no server, no OAuth app.
 
-const WEB_CLIENT_BEARER =
+const GQL_URL = "https://x.com/i/api/graphql";
+const OP = "Bookmarks";
+
+// The web app's public client bearer. This is NOT a secret and not your session:
+// it is the same constant the x.com web bundle ships, and it merely identifies
+// the app. Your identity comes from the auth_token cookie, sent by the browser.
+const WEB_BEARER =
   "AAAAAAAAAAAAAAAAAAAAANRILgAAAAAAnNwIzUejRCOuH5E6I8xnZz4puTs%3D1Zv7ttfk8LF81IUq16cHjhLTvJu4FA33AGWWjCpTnA";
 
-// Known query IDs - will try these first, then discover more dynamically
-const BOOKMARKS_QUERY_IDS = [
+// Bootstrap candidates, ordered by evidence, not by hope.
+//   1. zFGFGLIm1akEv8PE3uut8w — captured from a live x.com bundle and confirmed
+//      by a successful full sync on 2026-10-24. This is the only one with proof.
+//   2. Two older hashes kept as a cheap extra try: a rejected hash costs one
+//      404, and X keeps previous builds alive for a while after a rotation.
+// A fresh install still recovers on its own if all three are stale: the failed
+// sync flags ROTATED, capture.js reads the live hash out of the page bundle,
+// and the sync retries. The hash is never the thing that breaks installs.
+const FALLBACK_QUERY_IDS = [
+  "zFGFGLIm1akEv8PE3uut8w",
   "vvgIHIejOsbp0Dn5KytkZg",
   "qToeLeMs43Q8cr7tRYXmaQ",
-  "zZXycP0V6H7m-2r0ZW0h9A",
 ];
-
-const STORE = {
-  enabled: "enabled",
-  showRail: "showRail",
-  frequency: "frequency",
-  prioritizeRecent: "prioritizeRecent",
-  lastUpdated: "lastUpdated",
-  bookmarkCount: "bookmarkCount",
-  bookmarks: "bookmarks_cache",
-  users: "users_cache",
-  queryId: "bookmarks_query_id",
-  txnId: "x_client_transaction_id",
-};
 
 const FEATURES = {
   responsive_web_graphql_exclude_directive_enabled: true,
@@ -48,134 +49,50 @@ const FEATURES = {
   graphql_timeline_v2_bookmark_timeline: true,
 };
 
-const MAX_PAGES = 5;
+const STORE = {
+  enabled: "enabled",
+  showRail: "showRail",
+  showIndicator: "showIndicator",
+  railSize: "railSize",
+  prioritizeRecent: "prioritizeRecent",
+  injectInFeed: "injectInFeed",
+  injectEvery: "injectEvery",
+  injectMode: "injectMode",
+  frequency: "frequency",
+  lastUpdated: "lastUpdated",
+  bookmarkCount: "bookmarkCount",
+  bookmarks: "bookmarks_cache",
+  users: "users_cache",
+  queryId: "bookmarks_query_id",
+  discovered: "bookmarks_discovered_query_id",
+  queryIdStale: "bookmarks_query_id_stale",
+  lastFullSync: "bookmarks_last_full_sync",
+  pendingFull: "bookmarks_pending_full",
+};
 
-// Dynamic query ID discovery - scrapes X's JS bundles
-async function discoverQueryIds() {
-  const discovered = [];
-  try {
-    // Try to fetch page HTML which contains GraphQL query IDs
-    const res = await fetch("https://x.com/i/bookmarks", {
-      headers: {
-        "x-twitter-active-user": "yes",
-        "user-agent": navigator.userAgent,
-      },
-    });
-    
-    // Look for query IDs in the response (they look like long base64-alphanumeric strings)
-    const text = await res.text();
-    const idPattern = /[A-Za-z0-9_-]{20,30}/g;
-    const matches = text.match(idPattern) || [];
-    
-    for (const id of matches) {
-      // Verify it's a valid query ID by making a test request
-      try {
-        const testRes = await gqlRequest(id, "test", null, null, null);
-        // 200 means valid, 404/401 means invalid/rate limited
-        if (testRes.status === 200) {
-          discovered.push(id);
-          console.log("[xbm] discovered query ID:", id);
-        }
-      } catch (e) {}
-    }
-  } catch (e) {
-    console.log("[xbm] query discovery failed:", e.message);
-  }
-  return discovered;
-}
+// Only these keys may be written through updateSettings.
+const SETTING_KEYS = new Set([
+  STORE.enabled,
+  STORE.showRail,
+  STORE.showIndicator,
+  STORE.railSize,
+  STORE.prioritizeRecent,
+  STORE.injectInFeed,
+  STORE.injectEvery,
+  STORE.injectMode,
+  STORE.frequency,
+]);
 
-chrome.runtime.onInstalled.addListener(() => {
-  chrome.storage.local.set({
-    [STORE.enabled]: true,
-    [STORE.showRail]: true,
-    [STORE.frequency]: "medium",
-    [STORE.prioritizeRecent]: true,
-    [STORE.lastUpdated]: null,
-    [STORE.bookmarkCount]: 0,
-  });
-  console.log("[xbm] installed");
-});
-
-chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
-  if (!message || !message.action) return;
-
-  if (message.action === "refreshBookmarks") {
-    fetchBookmarks()
-      .then((r) => sendResponse({ success: true, count: r.count, queryId: r.queryId }))
-      .catch((err) => sendResponse({ success: false, error: err.message, code: err.code || null }));
-    return true;
-  }
-
-  if (message.action === "getBookmarks") {
-    chrome.storage.local.get([STORE.bookmarks, STORE.users]).then((d) => {
-      sendResponse({ bookmarks: d[STORE.bookmarks] || [], users: d[STORE.users] || {} });
-    });
-    return true;
-  }
-
-  if (message.action === "updateSettings") {
-    chrome.storage.local.set(message.settings || {}).then(() => {
-      if (message.settings && message.settings[STORE.enabled]) {
-        fetchBookmarks().catch(() => {});
-      }
-      sendResponse({ success: true });
-    });
-    return true;
-  }
-
-  if (message.action === "debugInfo") {
-    getDebugInfo().then((info) => sendResponse({ success: true, debug: info }));
-    return true;
-  }
-});
-
-async function getDebugInfo() {
-  const [storage, cookies] = await Promise.all([chrome.storage.local.get(null), getCookies()]);
-  return {
-    storage: {
-      enabled: storage[STORE.enabled],
-      showRail: storage[STORE.showRail],
-      bookmarkCount: storage[STORE.bookmarkCount],
-      lastUpdated: storage[STORE.lastUpdated],
-      queryId: storage[STORE.queryId] || null,
-      txnId: storage[STORE.txnId] ? "present" : "absent",
-    },
-    session: {
-      hasAuthToken: !!cookies.authToken,
-      hasCsrf: !!cookies.csrf,
-      authCookieName: cookies.authCookieName || null,
-      xCookieCount: cookies.xCount,
-      twitterCookieCount: cookies.twCount,
-      cookieNames: cookies.names,
-    },
-    candidates: BOOKMARKS_QUERY_IDS,
-  };
-}
-
-async function getCookies() {
-  const [x, tw] = await Promise.all([
-    chrome.cookies.getAll({ domain: ".x.com" }),
-    chrome.cookies.getAll({ domain: ".twitter.com" }),
-  ]);
-  const all = [...x, ...tw];
-  const authToken =
-    (all.find((c) => c.name === "auth_token") || {}).value ||
-    (all.find((c) => c.name === "kdt") || {}).value || null;
-  const csrf = (all.find((c) => c.name === "ct0") || {}).value || null;
-
-  return {
-    authToken,
-    csrf,
-    authCookieName: all.find((c) => c.name === "auth_token")
-      ? "auth_token"
-      : all.find((c) => c.name === "kdt")
-        ? "kdt"
-        : null,
-    names: all.map((c) => c.name),
-    xCount: x.length,
-    twCount: tw.length,
-  };
-}
+// Bookmarks arrive newest-first, so most syncs only need the first few pages.
+const MAX_PAGES = 120;
+const INCREMENTAL_PAGES = 3;
+const FULL_SYNC_MS = 24 * 60 * 60 * 1000;
+// Keep well inside the service worker's lifetime for a single request run.
+const FULL_SYNC_SECONDS = 150;
+// A "full" pass that returns almost nothing is a schema change, not a user
+// deleting their library. Below this floor the cache is kept, not replaced.
+const MIN_TRUSTED_FULL = 200;
+const PER_PAGE = 100;
 
 class XbmError extends Error {
   constructor(message, code) {
@@ -184,9 +101,36 @@ class XbmError extends Error {
   }
 }
 
-async function gqlRequest(queryId, csrf, txnId, cursor, authToken) {
+class RotatedError extends XbmError {
+  constructor(queryId, status) {
+    super("query id " + queryId + " rejected (" + status + ")", "ROTATED");
+  }
+}
+
+/* ------------------------------------------------------------------ session */
+
+async function getCookies() {
+  const [x, tw] = await Promise.all([
+    chrome.cookies.getAll({ domain: ".x.com" }),
+    chrome.cookies.getAll({ domain: ".twitter.com" }),
+  ]);
+  const all = [...x, ...tw];
+  const pick = (name) => (all.find((c) => c.name === name) || {}).value || null;
+  return {
+    authToken: pick("auth_token") || pick("kdt"),
+    csrf: pick("ct0"),
+    authCookieName: pick("auth_token") ? "auth_token" : pick("kdt") ? "kdt" : null,
+    names: all.map((c) => c.name),
+    xCount: x.length,
+    twCount: tw.length,
+  };
+}
+
+/* ------------------------------------------------------------------ request */
+
+async function gqlRequest(queryId, session, cursor) {
   const variables = {
-    count: 100,
+    count: PER_PAGE,
     includePromotedContent: false,
     withClientEventToken: false,
     withBirdwatchNotes: false,
@@ -196,343 +140,561 @@ async function gqlRequest(queryId, csrf, txnId, cursor, authToken) {
   };
 
   const url =
-    GQL_URL + "/" + queryId + "/" + BOOKMARKS_OP +
+    GQL_URL +
+    "/" + queryId + "/" + OP +
     "?variables=" + encodeURIComponent(JSON.stringify(variables)) +
     "&features=" + encodeURIComponent(JSON.stringify(FEATURES));
 
-  // Prepare Bearer token - try auth_token, fallback to static web bearer
-  // auth_token is URL-encoded from cookie, decode it first
-  let bearerToken = "";
-  if (authToken) {
-    try {
-      bearerToken = decodeURIComponent(authToken);
-    } catch (e) {
-      bearerToken = authToken;
-    }
-    console.log("[xbm] using session auth token:", bearerToken.substring(0, 30) + (bearerToken.length > 30 ? "..." : ""));
+  const res = await fetch(url, {
+    method: "GET",
+    credentials: "include",
+    headers: {
+      authorization: "Bearer " + WEB_BEARER,
+      "x-csrf-token": session.csrf,
+      "x-twitter-auth-type": "OAuth2Session",
+      "x-twitter-active-user": "yes",
+      "x-twitter-client-language": "en",
+      "content-type": "application/json",
+      Referer: "https://x.com/i/bookmarks",
+      Origin: "https://x.com",
+    },
+  });
+
+  // 404 -> this hash no longer exists (X rebuilt). 422 -> hash exists but the
+  // operation/variables do not match. Both mean "try another hash".
+  if (res.status === 404 || res.status === 422) {
+    throw new RotatedError(queryId, res.status);
   }
-  if (!bearerToken) {
-    bearerToken = WEB_CLIENT_BEARER;
-    console.log("[xbm] using static web client bearer");
+  if (res.status === 401 || res.status === 403) {
+    throw new XbmError(
+      "X rejected the session (HTTP " + res.status + "). Sign in to x.com again, then retry.",
+      "SESSION_REJECTED"
+    );
   }
-  
-  const headers = {
-    authorization: "Bearer " + bearerToken,
-    "x-csrf-token": csrf,
-    "x-twitter-auth-type": "OAuth2Session",
-    "x-twitter-active-user": "yes",
-    "x-twitter-client-language": "en",
-    "content-type": "application/json",
-    "x-requested-with": "XMLHttpRequest",
-    Referer: "https://x.com/i/bookmarks",
-    Origin: "https://x.com",
+  if (res.status === 429) {
+    throw new XbmError("Rate limited by X. Wait a few minutes, then retry.", "RATE_LIMITED");
+  }
+  if (!res.ok) {
+    throw new XbmError("X returned HTTP " + res.status, "HTTP_ERROR");
+  }
+
+  const payload = await res.json();
+  // X often returns usable data with non-fatal errors ("some tweets are
+  // unavailable"). Only fail when there is nothing to read.
+  if (payload.errors && payload.errors.length && !payload.data) {
+    throw new XbmError(
+      "X returned errors: " + payload.errors.map((e) => e.message).join("; "),
+      "GQL_ERROR"
+    );
+  }
+  return payload;
+}
+
+/* -------------------------------------------------------------------- parse */
+
+// Handles both the current schema (handle/name/avatar under `core`, `avatar`)
+// and the older one (everything under `legacy`).
+function readUser(node) {
+  if (!node) return null;
+  const core = node.core || {};
+  const legacy = node.legacy || {};
+  const username = core.screen_name || legacy.screen_name || node.screen_name || null;
+  const displayName = core.name || legacy.name || node.name || username;
+  const avatar =
+    (node.avatar && node.avatar.image_url) ||
+    legacy.profile_image_url_https ||
+    node.profile_image_url_https ||
+    "";
+  const id = node.rest_id || node.id_str || node.id;
+  if (!id || !username) return null;
+  return {
+    id: String(id),
+    username,
+    displayName: displayName || username,
+    profileImage: avatar,
+    verified: !!(node.is_blue_verified || legacy.verified || node.verified),
   };
-  if (txnId) headers["x-client-transaction-id"] = txnId;
-
-  return fetch(url, { method: "GET", headers, credentials: "include" });
 }
 
-function deepGet(obj, path) {
-  if (!path) return obj;
-  const parts = path.split(".");
-  let cur = obj;
-  for (const p of parts) {
-    if (cur == null) return undefined;
-    cur = cur[p];
-  }
-  return cur;
-}
-
-function getTypedObject(obj) {
-  const result = {};
-  function walk(o) {
-    if (!o || typeof o !== "object") return;
-    if (Array.isArray(o)) { for (const item of o) walk(item); }
-    else {
-      const tn = o.__typename;
-      if (tn) { if (!result[tn]) result[tn] = []; result[tn].push(o); }
-      const tp = o.type;
-      if (tp) { if (!result[tp]) result[tp] = []; result[tp].push(o); }
-      for (const key of Object.keys(o)) { if (key !== "__typename" && key !== "type") walk(o[key]); }
+function findInstructions(payload) {
+  const data = payload && payload.data;
+  if (!data) return [];
+  const queue = [data];
+  while (queue.length) {
+    const cur = queue.shift();
+    if (!cur || typeof cur !== "object") continue;
+    if (Array.isArray(cur.instructions)) return cur.instructions;
+    for (const key of Object.keys(cur)) {
+      const v = cur[key];
+      if (v && typeof v === "object") queue.push(v);
     }
   }
-  walk(obj);
-  return result;
-}
-
-function extractEntries(payload, typed) {
-  if (typed && typed.TimelineAddEntries && typed.TimelineAddEntries[0]) {
-    const entries = typed.TimelineAddEntries[0].entries;
-    if (entries && entries.length > 0) return entries;
-  }
-  
-  const pathCandidates = [
-    ["data", "bookmark_timeline_v2", "timeline", "instructions"],
-    ["data", "bookmark_timeline", "timeline", "instructions"],
-    ["data", "user", "result", "timeline", "timeline", "instructions"],
-    ["data", "user", "result", "timeline", "instructions"],
-  ];
-  
-  for (const path of pathCandidates) {
-    const instructions = deepGet(payload, path.join("."));
-    if (Array.isArray(instructions)) {
-      for (const instr of instructions) {
-        if (instr && instr.entries && instr.entries.length > 0) {
-          return instr.entries;
-        }
-      }
-    }
-  }
-  
   return [];
 }
 
-function nextCursor(payload, typed) {
-  const entries = extractEntries(payload, typed);
-  if (entries.length > 0) {
-    const bottom = entries.slice().reverse().find((e) => String(e.entryId || "").startsWith("cursor-bottom"));
-    if (bottom && bottom.content && bottom.content.value) return bottom.content.value;
+function collectEntries(instructions) {
+  const entries = [];
+  for (const instr of instructions) {
+    if (instr && Array.isArray(instr.entries)) entries.push(...instr.entries);
+    if (instr && instr.entry && instr.entry.content) entries.push(instr.entry);
   }
-  
-  const pathCandidates = [
-    ["data", "bookmark_timeline_v2", "timeline", "instructions"],
-    ["data", "bookmark_timeline", "timeline", "instructions"],
-  ];
-  
-  for (const path of pathCandidates) {
-    const instructions = deepGet(payload, path.join("."));
-    if (Array.isArray(instructions)) {
-      for (const instr of instructions) {
-        if (instr && instr.entries) {
-          const bottom = instr.entries.slice().reverse().find((e) => String(e.entryId || "").startsWith("cursor-bottom"));
-          if (bottom && bottom.content && bottom.content.value) return bottom.content.value;
-        }
-      }
-    }
+  return entries;
+}
+
+function tweetOf(entry) {
+  const content = entry && entry.content;
+  if (!content) return null;
+  const item = content.itemContent || (content.item && content.item.itemContent);
+  let result = item && item.tweet_results && item.tweet_results.result;
+  // Some bookmarks come back wrapped for visibility limits; the tweet itself
+  // is one level down. Without this, those saves vanish on every sync.
+  if (result && result.__typename === "TweetWithVisibilityResults" && result.tweet) {
+    result = result.tweet;
   }
-  
-  return null;
+  if (!result || result.__typename === "TweetTombstone") return null;
+  return result;
 }
 
-function findUser(node) {
-  if (!node) return null;
-  const userRes = node.core && node.core.user_results && node.core.user_results.result 
-    ? node.core.user_results.result 
-    : (node.user && node.user.results && node.user.results.found && node.user.results.found[0] 
-       ? node.user.results.found[0] : node.user);
-  if (!userRes) return null;
-  const userId = userRes.rest_id || userRes.id_str;
-  const handle = userRes.legacy && userRes.legacy.screen_name ? userRes.legacy.screen_name : userRes.screen_name;
-  if (!userId || !handle) return null;
-  return {
-    id: userId,
-    username: handle,
-    displayName: (userRes.legacy && userRes.legacy.name) || (userRes.name ? userRes.name : null) || handle,
-    profileImage: (userRes.legacy && userRes.legacy.profile_image_url_https) 
-      || (userRes.profile_image_url_https ? userRes.profile_image_url_https : null) || "",
-    verified: !!(userRes.is_blue_verified || (userRes.legacy && userRes.legacy.verified)),
-  };
+function textOf(tweet) {
+  const note =
+    tweet.note_tweet &&
+    tweet.note_tweet.note_tweet_results &&
+    tweet.note_tweet.note_tweet_results.result;
+  if (note && note.text) return note.text;
+  const legacy = tweet.legacy || {};
+  return legacy.full_text || tweet.full_text || "";
 }
 
-function findString(root, paths) {
-  if (!root || !Array.isArray(paths)) return "";
-  for (const p of paths) {
-    const v = deepGet(root, p);
-    if (v != null && typeof v === "string") return v;
-  }
-  return "";
+function mediaOf(tweet) {
+  const legacy = tweet.legacy || {};
+  const list =
+    (legacy.extended_entities && legacy.extended_entities.media) ||
+    (legacy.entities && legacy.entities.media) ||
+    [];
+  return list.map((m) => ({
+    type: m.type,
+    url: m.media_url_https,
+    alt: m.ext_alt_text || "",
+  }));
 }
 
-function findCount(root, paths) {
-  if (!root || !Array.isArray(paths)) return 0;
-  for (const p of paths) {
-    const v = deepGet(root, p);
-    if (v != null && typeof v === "number") return v;
-  }
-  return 0;
-}
-
-function findMedia(node) {
-  if (!node) return [];
-  const legacy = node.legacy || {};
-  return legacy.entities && legacy.entities.media ? legacy.entities.media : [];
-}
-
-function findDate(node) {
-  if (!node) return null;
-  const legacy = node.legacy || {};
-  return legacy.created_at || node.created_at || null;
-}
-
-function parseEntries(entries, typed) {
-  if (!typed) typed = {};
+function parseInstructions(instructions) {
+  const entries = collectEntries(instructions);
   const bookmarks = [];
   const users = {};
-
-  const typedUsers = typed.User || [];
-  for (const u of typedUsers) {
-    const userId = u.rest_id || u.id_str;
-    const handle = (u.legacy && u.legacy.screen_name) || u.screen_name;
-    if (userId && handle) {
-      users[userId] = {
-        id: userId,
-        username: handle,
-        displayName: (u.legacy && u.legacy.name) || u.name || handle,
-        profileImage: (u.legacy && u.legacy.profile_image_url_https) || u.profile_image_url_https || "",
-        verified: !!(u.is_blue_verified || (u.legacy && u.legacy.verified)),
-      };
-    }
-  }
+  let cursor = null;
 
   for (const entry of entries) {
-    if (!entry || !String(entry.entryId || "").startsWith("tweet-")) continue;
-    try {
-      const item = entry.content && entry.content.itemContent 
-        ? entry.content.itemContent 
-        : (entry.content && entry.content.item && entry.content.item.itemContent ? entry.content.item.itemContent : null);
-      if (!item) continue;
+    const entryId = String(entry.entryId || "");
 
-      const tweetResults = item.tweet_results;
-      const result = tweetResults && tweetResults.result ? tweetResults.result : null;
-      if (!result) continue;
-      if (result.__typename === "TweetTombstone") continue;
-
-      const tweetId = result.rest_id || (result.legacy && result.legacy.id_str ? result.legacy.id_str : null);
-      if (!tweetId) continue;
-
-      const userRes = (result.core && result.core.user_results && result.core.user_results.result 
-        ? result.core.user_results.result : null) || (result.user ? result.user : null);
-      if (!userRes) continue;
-
-      const userId = userRes.rest_id || userRes.id_str;
-      const handle = (userRes.legacy && userRes.legacy.screen_name) || userRes.screen_name;
-      if (!userId || !handle) continue;
-
-      const legacy = result.legacy || {};
-      const text = findString(result, ["legacy.full_text", "note_tweet.note_tweet_results.result.text", "full_text"]);
-
-      const userProfile = users[userId] || findUser(result);
-      if (userProfile && !users[userId]) users[userId] = userProfile;
-
-      bookmarks.push({
-        id: tweetId,
-        userId: userId,
-        text: text,
-        created_at: findDate(result),
-        media: findMedia(result),
-        likes: findCount(result, ["legacy.favorite_count", "favorite_count"]),
-        retweets: findCount(result, ["legacy.retweet_count", "retweet_count"]),
-        replies: findCount(result, ["legacy.reply_count", "reply_count"]),
-        url: "https://x.com/" + handle + "/status/" + tweetId,
-      });
-    } catch (err) {
-      console.warn("[xbm] entry parse failed", err);
+    if (entryId.startsWith("cursor-bottom")) {
+      cursor = (entry.content && entry.content.value) || null;
+      continue;
     }
+    if (!entryId.startsWith("tweet-")) continue;
+
+    const tweet = tweetOf(entry);
+    if (!tweet) continue;
+
+    const user = readUser(
+      (tweet.core && tweet.core.user_results && tweet.core.user_results.result) || tweet.user
+    );
+    if (!user) continue;
+
+    const legacy = tweet.legacy || {};
+    const tweetId = String(tweet.rest_id || legacy.id_str || "");
+    if (!tweetId) continue;
+
+    users[user.id] = user;
+    bookmarks.push({
+      id: tweetId,
+      userId: user.id,
+      text: textOf(tweet),
+      createdAt: legacy.created_at || tweet.created_at || null,
+      media: mediaOf(tweet),
+      likes: legacy.favorite_count || 0,
+      retweets: legacy.retweet_count || 0,
+      replies: legacy.reply_count || 0,
+      // Stable across username changes; /user/status/id goes dead on a rename.
+      url: "https://x.com/i/web/status/" + tweetId,
+    });
   }
 
   const seen = new Set();
-  const cleanBookmarks = bookmarks.filter((b) => {
-    if (!b || !b.id) return false;
+  const unique = bookmarks.filter((b) => {
     if (seen.has(b.id)) return false;
     seen.add(b.id);
     return true;
   });
 
-  return { bookmarks: cleanBookmarks, users: users };
+  return { bookmarks: unique, users, cursor };
 }
 
-async function fetchBookmarks() {
-  const cookies = await getCookies();
+/* -------------------------------------------------------------------- fetch */
 
-  if (!cookies.authToken) {
-    throw new XbmError("Not signed in to X. Open x.com in a tab and log in, then retry.", "NO_SESSION");
+async function candidateIds() {
+  const stored = await chrome.storage.local.get([STORE.queryId, STORE.discovered]);
+  const ids = [];
+  const push = (id) => {
+    if (id && !ids.includes(id)) ids.push(id);
+  };
+  push(stored[STORE.queryId]);
+  push(stored[STORE.discovered]);
+  FALLBACK_QUERY_IDS.forEach(push);
+  return ids;
+}
+
+// Fresh results first, then everything already cached that this pass did not
+// see. Used for incremental syncs and for any pass we do not trust as complete.
+function mergeNewest(fresh, old, freshIds) {
+  return fresh.concat(old.filter((b) => !freshIds.has(b.id)));
+}
+
+let inFlight = null;
+
+// One sync at a time. A fresh install fires two callers at once (onInstalled
+// plus the content script), and an alarm can land on top of a manual refresh.
+// Racing passes double the requests and let an older, shorter result overwrite
+// a newer one.
+function fetchBookmarks(opts = {}) {
+  if (inFlight) return inFlight;
+  chrome.storage.local.set({ syncing: true });
+  inFlight = runSync(opts).finally(() => {
+    inFlight = null;
+    chrome.storage.local.set({ syncing: false });
+  });
+  return inFlight;
+}
+
+async function runSync(opts = {}) {
+  const session = await getCookies();
+  if (!session.authToken) {
+    throw new XbmError("Not signed in to X. Open x.com, log in, then retry.", "NO_SESSION");
   }
-  if (!cookies.csrf) {
-    throw new XbmError("CSRF token (ct0) missing. Reload x.com while signed in, then retry.", "NO_CSRF");
+  if (!session.csrf) {
+    throw new XbmError("CSRF token (ct0) missing. Reload x.com while signed in.", "NO_CSRF");
   }
 
-  const stored = await chrome.storage.local.get([STORE.queryId, STORE.txnId]);
-  const override = stored[STORE.queryId];
-  const ids = override ? [override, ...BOOKMARKS_QUERY_IDS.filter((i) => i !== override)] : [...BOOKMARKS_QUERY_IDS];
+  const stored = await chrome.storage.local.get([
+    STORE.bookmarks,
+    STORE.users,
+    STORE.bookmarkCount,
+    STORE.lastFullSync,
+    STORE.pendingFull,
+  ]);
+  const existing = Array.isArray(stored[STORE.bookmarks]) ? stored[STORE.bookmarks] : [];
+  const pending = stored[STORE.pendingFull];
+  const existingUsers =
+    stored[STORE.users] && typeof stored[STORE.users] === "object" ? stored[STORE.users] : {};
 
-  const txnId = stored[STORE.txnId] || null;
+  // Bookmarks arrive newest-first, so a short sync is enough to pick up
+  // everything saved since the last run. Walk the whole library once a day (and
+  // on first run) to catch deletions.
+  const full =
+    opts.full === true ||
+    !existing.length ||
+    Date.now() - (stored[STORE.lastFullSync] || 0) > FULL_SYNC_MS;
+  const pageCap = full ? MAX_PAGES : INCREMENTAL_PAGES;
+  const deadline = full ? Date.now() + FULL_SYNC_SECONDS * 1000 : 0;
+
+  const ids = await candidateIds();
   let lastError = null;
 
   for (const queryId of ids) {
-    const collected = [];
-    const users = {};
     let cursor = null;
-    let accepted = false;
+    const bookmarks = [];
+    const users = {};
+    const seenIds = new Set();
+    let pages = 0;
+    let truncated = false;
 
     try {
-      for (let page = 0; page < MAX_PAGES; page++) {
-        const res = await gqlRequest(queryId, cookies.csrf, txnId, cursor, cookies.authToken);
-
-        if (res.status === 404) {
-          lastError = new XbmError("queryId " + queryId + " returned 404 (rotated)", "STALE_QUERY_ID");
+      while (pages < pageCap) {
+        if (deadline && Date.now() > deadline) {
+          truncated = true;
           break;
         }
-        if (res.status === 429) {
-          throw new XbmError("Rate limited by X. Wait a few minutes and retry.", "RATE_LIMITED");
-        }
-        if (res.status === 401 || res.status === 403) {
-          throw new XbmError("X rejected the session (HTTP " + res.status + "). Sign in to x.com again, then retry.", "SESSION_REJECTED");
-        }
-        if (!res.ok) {
-          throw new XbmError("X returned HTTP " + res.status, "HTTP_ERROR");
-        }
+        const payload = await gqlRequest(queryId, session, cursor);
+        const parsed = parseInstructions(findInstructions(payload));
 
-        const payload = await res.json();
-        if (payload.errors && payload.errors.length) {
-          throw new XbmError("X returned errors: " + payload.errors.map((e) => e.message).join("; "), "GQL_ERROR");
+        let added = 0;
+        for (const b of parsed.bookmarks) {
+          if (seenIds.has(b.id)) continue;
+          seenIds.add(b.id);
+          bookmarks.push(b);
+          added++;
         }
+        Object.assign(users, parsed.users);
+        cursor = parsed.cursor;
+        pages++;
 
-        const typed = getTypedObject(payload);
-        const entries = extractEntries(payload, typed);
-        const parsed = parseEntries(entries, typed);
-        
-        for (const b of parsed.bookmarks) collected.push(b);
-        for (const uid of Object.keys(parsed.users)) users[uid] = parsed.users[uid];
-        accepted = true;
-
-        cursor = nextCursor(payload, typed);
-        if (!cursor) break;
+        // Stop on the end of the list, or on a page that taught us nothing new
+        // (a repeated cursor would otherwise loop until the cap).
+        if (!cursor || !parsed.bookmarks.length || added === 0) break;
+        if (pages >= pageCap) truncated = !!cursor;
       }
     } catch (err) {
-      if (err instanceof XbmError && err.code === "STALE_QUERY_ID") continue;
+      if (err instanceof RotatedError) {
+        lastError = err;
+        continue;
+      }
       throw err;
     }
 
-    if (!accepted) continue;
+    if (!bookmarks.length) {
+      // Almost always a transient X hiccup, or an account that really has no
+      // bookmarks. Never let a blank response wipe a good cache.
+      if (existing.length) {
+        return { count: existing.length, queryId, unchanged: true, full };
+      }
+    }
 
-    const seen = new Set();
-    const bookmarks = collected.filter((b) => {
-      if (!b || !b.id) return false;
-      if (seen.has(b.id)) return false;
-      seen.add(b.id);
-      return true;
-    });
+    // A full pass is only authoritative if it reached the end. A deadline
+    // cut-off, or a "full" result that is a fraction of what we already have,
+    // means the page shape changed — merge, never replace.
+    //
+    // The shrink guard needs an exit or the cache becomes immortal: a user who
+    // really deleted their library would see the same ghosts forever. So a
+    // shrunken result is recorded, and if the next full pass returns the same
+    // count, it is accepted as the truth.
+    const repeat =
+      !!pending &&
+      pending.count === bookmarks.length &&
+      Date.now() - (pending.at || 0) < 2 * FULL_SYNC_MS;
+    const complete = full && !truncated;
+    const suspicious =
+      complete &&
+      existing.length >= 400 &&
+      bookmarks.length < MIN_TRUSTED_FULL &&
+      !repeat;
+    const authoritative = complete && !suspicious;
+
+    const merged = authoritative ? bookmarks : mergeNewest(bookmarks, existing, seenIds);
+    const mergedUsers = authoritative ? users : Object.assign({}, existingUsers, users);
+    const pendingWrite = suspicious
+      ? { count: bookmarks.length, at: Date.now() }
+      : authoritative
+        ? null
+        : pending || null;
 
     await chrome.storage.local.set({
-      bookmarks: bookmarks,
-      users: users,
-      lastUpdated: Date.now(),
-      bookmarkCount: bookmarks.length,
+      [STORE.bookmarks]: merged,
+      [STORE.users]: mergedUsers,
+      [STORE.lastUpdated]: Date.now(),
+      [STORE.bookmarkCount]: merged.length,
+      [STORE.discovered]: queryId,
+      [STORE.queryIdStale]: false,
+      [STORE.lastFullSync]: authoritative ? Date.now() : stored[STORE.lastFullSync] || 0,
+      [STORE.pendingFull]: pendingWrite,
     });
 
-    console.log("[xbm] " + bookmarks.length + " bookmarks via " + queryId);
-    return { count: bookmarks.length, queryId: queryId, users: users };
+    if (suspicious) {
+      console.warn(
+        "[xbm] full sync returned " + bookmarks.length + " of " + existing.length +
+          " bookmarks — keeping the cache (endpoint likely changed)"
+      );
+    } else if (repeat && bookmarks.length < MIN_TRUSTED_FULL) {
+      console.log(
+        "[xbm] shrunken full sync repeated (" + bookmarks.length + " bookmarks) — accepting it"
+      );
+    }
+
+    console.log(
+      "[xbm] " + merged.length + " bookmarks (" + (full ? "full" : "incremental") +
+        ", " + pages + " pages" + (truncated ? ", truncated" : "") + ") via " + queryId
+    );
+    return { count: merged.length, queryId, pages, full, truncated };
   }
 
-  throw lastError || new XbmError("All known query IDs were rejected.", "STALE_QUERY_ID");
+  if (lastError) await chrome.storage.local.set({ [STORE.queryIdStale]: true });
+  throw lastError || new XbmError("Every known query id was rejected.", "ROTATED");
 }
 
-chrome.alarms.create("refreshBookmarks", { periodInMinutes: 240 });
+/* ----------------------------------------------------------------- message */
+
+// Applied on every worker start, not just on install: a user who wipes storage
+// (or a browser that drops it) still ends up with a working, configured
+// extension the moment the worker wakes.
+async function applyDefaults() {
+  const d = await chrome.storage.local.get(Object.values(STORE));
+  const patch = {};
+  if (d[STORE.enabled] === undefined) patch[STORE.enabled] = true;
+  if (d[STORE.showRail] === undefined) patch[STORE.showRail] = true;
+  if (d[STORE.showIndicator] === undefined) patch[STORE.showIndicator] = true;
+  if (d[STORE.railSize] === undefined) patch[STORE.railSize] = "standard";
+  if (d[STORE.injectInFeed] === undefined) patch[STORE.injectInFeed] = true;
+  if (d[STORE.injectEvery] === undefined) patch[STORE.injectEvery] = 10;
+  if (d[STORE.injectMode] === undefined) patch[STORE.injectMode] = "smart";
+  if (d[STORE.frequency] === undefined) patch[STORE.frequency] = "medium";
+  if (d[STORE.prioritizeRecent] === undefined) patch[STORE.prioritizeRecent] = true;
+  if (Object.keys(patch).length) await chrome.storage.local.set(patch);
+}
+
+applyDefaults();
+
+chrome.runtime.onInstalled.addListener(() => {
+  applyDefaults().then(() => {
+    fetchBookmarks().catch((err) => console.warn("[xbm] first sync failed:", err.message));
+  });
+});
+
+chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
+  if (!message || !message.action) return;
+
+  if (message.action === "refreshBookmarks") {
+    fetchBookmarks({ full: message.full === true })
+      .then((r) =>
+        sendResponse({
+          success: true,
+          count: r.count,
+          queryId: r.queryId,
+          pages: r.pages || 0,
+          full: !!r.full,
+          truncated: !!r.truncated,
+          unchanged: !!r.unchanged,
+        })
+      )
+      .catch((err) => sendResponse({ success: false, error: err.message, code: err.code || null }));
+    return true;
+  }
+
+  if (message.action === "forgetBookmark") {
+    // X just confirmed a DeleteBookmark. Drop it from the cache now; the rail
+    // and any open tab re-render from this write, and the daily full sync
+    // remains the backstop for removals made anywhere we are not watching.
+    const id = typeof message.id === "string" ? message.id : "";
+    if (!/^\d{5,25}$/.test(id)) {
+      sendResponse({ success: false });
+      return;
+    }
+    chrome.storage.local.get([STORE.bookmarks]).then(async (d) => {
+      const list = Array.isArray(d[STORE.bookmarks]) ? d[STORE.bookmarks] : [];
+      const next = list.filter((b) => String(b.id) !== id);
+      if (next.length === list.length) {
+        sendResponse({ success: true, removed: 0 });
+        return;
+      }
+      await chrome.storage.local.set({
+        [STORE.bookmarks]: next,
+        [STORE.bookmarkCount]: next.length,
+      });
+      sendResponse({ success: true, removed: list.length - next.length });
+    });
+    return true;
+  }
+
+  if (message.action === "learnQueryId") {
+    if (typeof message.queryId !== "string" || !/^[A-Za-z0-9_-]{10,40}$/.test(message.queryId)) {
+      sendResponse({ success: false });
+      return;
+    }
+    chrome.storage.local
+      .set({ [STORE.discovered]: message.queryId, [STORE.queryIdStale]: false })
+      .then(() => sendResponse({ success: true }));
+    return true;
+  }
+
+  if (message.action === "getBookmarks") {
+    chrome.storage.local.get([STORE.bookmarks, STORE.users]).then((d) =>
+      sendResponse({ bookmarks: d[STORE.bookmarks] || [], users: d[STORE.users] || {} })
+    );
+    return true;
+  }
+
+  if (message.action === "updateSettings") {
+    const patch = {};
+    for (const [key, value] of Object.entries(message.settings || {})) {
+      if (SETTING_KEYS.has(key)) patch[key] = value;
+    }
+    chrome.storage.local.set(patch).then(() => sendResponse({ success: true }));
+    return true;
+  }
+
+  if (message.action === "debugInfo") {
+    getDebugInfo()
+      .then((debug) => sendResponse({ success: true, debug }))
+      .catch((err) => sendResponse({ success: false, error: err.message }));
+    return true;
+  }
+});
+
+async function getDebugInfo() {
+  const [storage, session] = await Promise.all([
+    chrome.storage.local.get([
+      STORE.enabled,
+      STORE.showRail,
+      STORE.bookmarkCount,
+      STORE.lastUpdated,
+      STORE.discovered,
+    ]),
+    getCookies(),
+  ]);
+  return {
+    storage: {
+      enabled: storage[STORE.enabled],
+      showRail: storage[STORE.showRail],
+      bookmarkCount: storage[STORE.bookmarkCount],
+      lastUpdated: storage[STORE.lastUpdated],
+      queryId: storage[STORE.discovered] || null,
+    },
+    session: {
+      hasAuthToken: !!session.authToken,
+      hasCsrf: !!session.csrf,
+      authCookieName: session.authCookieName,
+      xCookieCount: session.xCount,
+      twitterCookieCount: session.twCount,
+      cookieNames: session.names,
+    },
+    candidates: await candidateIds(),
+  };
+}
+
+/* ------------------------------------------------------------------ alarms */
+
+const PERIODS = { low: 720, medium: 240, high: 60 };
+
+async function scheduleRefresh() {
+  const d = await chrome.storage.local.get(STORE.frequency);
+  const minutes = PERIODS[d[STORE.frequency]] || PERIODS.medium;
+  // The worker wakes for messages too; recreating the alarm on every wake would
+  // keep pushing the next fire time back.
+  const existing = await chrome.alarms.get("refreshBookmarks");
+  if (existing && existing.periodInMinutes === minutes) return;
+  await chrome.alarms.clear("refreshBookmarks");
+  chrome.alarms.create("refreshBookmarks", { periodInMinutes: minutes });
+}
+
+scheduleRefresh();
+
+// A browser restart clears the service worker but not the cache. If what we
+// have is older than the chosen cadence, refresh once on launch instead of
+// waiting for the first alarm.
+async function syncIfStale() {
+  const d = await chrome.storage.local.get([STORE.enabled, STORE.frequency, STORE.lastUpdated]);
+  if (d[STORE.enabled] === false) return;
+  const period = (PERIODS[d[STORE.frequency]] || PERIODS.medium) * 60000;
+  const age = Date.now() - (d[STORE.lastUpdated] || 0);
+  if (age < period) return;
+  try {
+    await fetchBookmarks();
+  } catch (err) {
+    console.warn("[xbm] startup sync failed:", err.message);
+  }
+}
+
+chrome.runtime.onStartup.addListener(() => {
+  scheduleRefresh();
+  syncIfStale();
+});
+
+chrome.storage.onChanged.addListener((changes, area) => {
+  if (area === "local" && changes[STORE.frequency]) scheduleRefresh();
+});
+
 chrome.alarms.onAlarm.addListener((alarm) => {
   if (alarm.name !== "refreshBookmarks") return;
   chrome.storage.local.get(STORE.enabled).then((d) => {
-    if (d[STORE.enabled]) {
-      fetchBookmarks().catch((err) => console.warn("[xbm] scheduled refresh failed", err));
-    }
+    if (d[STORE.enabled] === false) return;
+    fetchBookmarks().catch((err) => console.warn("[xbm] scheduled refresh failed:", err.message));
   });
 });

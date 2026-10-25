@@ -1,17 +1,18 @@
 {
   "manifest_version": 3,
   "name": "X Bookmarks Feed",
-  "version": "2.0",
+  "version": "3.5",
+  "minimum_chrome_version": "111",
   "description": "Surfaces your X bookmarks inside your home timeline.",
   "permissions": [
     "storage",
+    "unlimitedStorage",
     "cookies",
     "alarms"
   ],
   "host_permissions": [
     "https://x.com/*",
-    "https://twitter.com/*",
-    "https://abs.twimg.com/*"
+    "https://twitter.com/*"
   ],
   "action": {
     "default_popup": "popup.html",
@@ -22,13 +23,18 @@
     }
   },
   "background": {
-    "service_worker": "background.js",
-    "type": "module"
+    "service_worker": "background.js"
   },
   "content_scripts": [
     {
-      "matches": ["https://x.com/*", "https://twitter.com/*"],
-      "js": ["content.js"],
+      "matches": ["https://x.com/*"],
+      "js": ["capture.js"],
+      "run_at": "document_start",
+      "world": "MAIN"
+    },
+    {
+      "matches": ["https://x.com/*"],
+      "js": ["lib/match.js", "content.js"],
       "css": ["styles.css"]
     }
   ],

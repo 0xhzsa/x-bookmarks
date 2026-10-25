@@ -1,0 +1,42 @@
+name: release
+
+on:
+  push:
+    tags:
+      - "v*"
+
+permissions:
+  contents: write
+
+jobs:
+  release:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+
+      - name: Validate package
+        run: node scripts/validate.cjs
+
+      - name: Build store zip
+        run: node scripts/package.cjs
+
+      - name: Checksums
+        run: cd dist && sha256sum ./*.zip > SHA256SUMS.txt
+
+      - name: Publish release
+        uses: softprops/action-gh-release@v2
+        with:
+          files: |
+            dist/*.zip
+            dist/SHA256SUMS.txt
+          generate_release_notes: true
+          body: |
+            Built from the tagged commit. The zip has `manifest.json` at its root and is the
+            same file accepted by Chrome Web Store and Edge Add-ons.
+
+            Verify the download with `SHA256SUMS.txt`, or check the checksum printed in the
+            release log.

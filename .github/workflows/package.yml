@@ -1,0 +1,27 @@
+name: package
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+  package:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+      - name: Validate manifest and referenced files
+        run: node scripts/validate.cjs
+      - name: Build store zip
+        run: node scripts/package.cjs
+      - uses: actions/upload-artifact@v4
+        with:
+          name: x-bookmarks-zip
+          path: dist/*.zip
+          if-no-files-found: error
