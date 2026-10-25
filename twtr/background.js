@@ -68,6 +68,7 @@ const STORE = {
   queryIdStale: "bookmarks_query_id_stale",
   lastFullSync: "bookmarks_last_full_sync",
   pendingFull: "bookmarks_pending_full",
+  forgotten: "bookmarks_forgotten",
 };
 
 // Only these keys may be written through updateSettings.
@@ -84,14 +85,21 @@ const SETTING_KEYS = new Set([
 ]);
 
 // Bookmarks arrive newest-first, so most syncs only need the first few pages.
-const MAX_PAGES = 120;
-const INCREMENTAL_PAGES = 3;
+const MAX_PAGES = 600;
+const INCREMENTAL_PAGES = 5;
 const FULL_SYNC_MS = 24 * 60 * 60 * 1000;
-// Keep well inside the service worker's lifetime for a single request run.
-const FULL_SYNC_SECONDS = 150;
+// A full pass is the only thing that can retire an old save, so it gets a real
+// budget: six thousand bookmarks is sixty pages. Chrome keeps a worker alive
+// while a fetch is pending but caps a single run at five minutes, so stay under
+// that — a pass killed at the ceiling never advances the timestamp and would
+// start over forever.
+const FULL_SYNC_SECONDS = 240;
 // A "full" pass that returns almost nothing is a schema change, not a user
 // deleting their library. Below this floor the cache is kept, not replaced.
 const MIN_TRUSTED_FULL = 200;
+// How long a confirmed un-bookmark keeps vetoing writes. Long enough to outlive
+// any sync that was already in flight when the user hit the icon.
+const FORGET_TTL = 7 * 24 * 60 * 60 * 1000;
 const PER_PAGE = 100;
 
 class XbmError extends Error {
@@ -350,7 +358,63 @@ function mergeNewest(fresh, old, freshIds) {
   return fresh.concat(old.filter((b) => !freshIds.has(b.id)));
 }
 
+// X returns bookmarks in save order, newest save first. So the last post in a
+// fetched window marks a point on that timeline, and every cached post above it
+// was saved later: a pass that walked that far would have returned it. What is
+// missing from the window was un-bookmarked — on a phone, on another machine, or
+// with the page loaded before this extension was.
+function pruneDeletedAbove(fresh, old, freshIds) {
+  if (fresh.length < 2 || old.length < 2) return old;
+  const anchor = String(fresh[fresh.length - 1].id);
+  const cut = old.findIndex((b) => String(b.id) === anchor);
+  if (cut < 1) return old;
+
+  let dropped = 0;
+  const kept = old.filter((b, i) => {
+    if (i >= cut) return true;
+    if (freshIds.has(String(b.id))) return true;
+    dropped++;
+    return false;
+  });
+  if (dropped) console.log("[xbm] dropped " + dropped + " un-bookmarked post(s) from the cache");
+  return kept;
+}
+
+// A sync carries the cache as it was when the pass started. If the user
+// un-bookmarks while that pass is in flight, merging the snapshot would put the
+// post straight back, and the next daily walk is a day away. A tombstone is what
+// stops it.
+//
+// Fresh data outranks an *older* tombstone: seeing the post in the list after
+// the delete means it is bookmarked again (or the delete never went through).
+// It does not outrank a tombstone written after the pass started, because that
+// copy was fetched before the user hit the icon.
+function dropForgotten(list, forgotten, freshIds, since) {
+  const entries = forgotten && typeof forgotten === "object" ? Object.entries(forgotten) : [];
+  if (!entries.length) return list;
+  const edge = Date.now() - FORGET_TTL;
+  const dead = new Set();
+  for (const [id, at] of entries) {
+    if (typeof at !== "number" || at <= edge) continue;
+    if (!freshIds.has(id) || at >= since) dead.add(id);
+  }
+  if (!dead.size) return list;
+  return list.filter((b) => !dead.has(String(b.id)));
+}
+
+function pruneForgotten(forgotten) {
+  if (!forgotten || typeof forgotten !== "object") return {};
+  const edge = Date.now() - FORGET_TTL;
+  const out = {};
+  for (const [id, at] of Object.entries(forgotten)) {
+    if (typeof at === "number" && at > edge) out[id] = at;
+  }
+  return out;
+}
+
 let inFlight = null;
+// Serializes tombstone writes; see the forgetBookmark handler.
+let forgetQueue = Promise.resolve();
 
 // One sync at a time. A fresh install fires two callers at once (onInstalled
 // plus the content script), and an alarm can land on top of a manual refresh.
@@ -367,6 +431,9 @@ function fetchBookmarks(opts = {}) {
 }
 
 async function runSync(opts = {}) {
+  // Tombstones written after this instant beat whatever a page handed back:
+  // that copy may have been fetched before the user removed the save.
+  const startedAt = Date.now();
   const session = await getCookies();
   if (!session.authToken) {
     throw new XbmError("Not signed in to X. Open x.com, log in, then retry.", "NO_SESSION");
@@ -381,9 +448,14 @@ async function runSync(opts = {}) {
     STORE.bookmarkCount,
     STORE.lastFullSync,
     STORE.pendingFull,
+    STORE.forgotten,
   ]);
   const existing = Array.isArray(stored[STORE.bookmarks]) ? stored[STORE.bookmarks] : [];
   const pending = stored[STORE.pendingFull];
+  const forgotten =
+    stored[STORE.forgotten] && typeof stored[STORE.forgotten] === "object"
+      ? stored[STORE.forgotten]
+      : {};
   const existingUsers =
     stored[STORE.users] && typeof stored[STORE.users] === "object" ? stored[STORE.users] : {};
 
@@ -414,23 +486,24 @@ async function runSync(opts = {}) {
           truncated = true;
           break;
         }
-        const payload = await gqlRequest(queryId, session, cursor);
+        const requestCursor = cursor;
+        const payload = await gqlRequest(queryId, session, requestCursor);
         const parsed = parseInstructions(findInstructions(payload));
 
-        let added = 0;
         for (const b of parsed.bookmarks) {
           if (seenIds.has(b.id)) continue;
           seenIds.add(b.id);
           bookmarks.push(b);
-          added++;
         }
         Object.assign(users, parsed.users);
         cursor = parsed.cursor;
         pages++;
 
-        // Stop on the end of the list, or on a page that taught us nothing new
-        // (a repeated cursor would otherwise loop until the cap).
-        if (!cursor || !parsed.bookmarks.length || added === 0) break;
+        // Stop on the end of the list, or on a cursor that did not move (a
+        // repeated cursor would otherwise loop until the cap). A page that adds
+        // nothing new is not a reason to stop: the deeper the window reaches,
+        // the more deletions the merge below can prove.
+        if (!cursor || cursor === requestCursor || !parsed.bookmarks.length) break;
         if (pages >= pageCap) truncated = !!cursor;
       }
     } catch (err) {
@@ -469,7 +542,22 @@ async function runSync(opts = {}) {
       !repeat;
     const authoritative = complete && !suspicious;
 
-    const merged = authoritative ? bookmarks : mergeNewest(bookmarks, existing, seenIds);
+    // A pass we do not trust to be complete still knows something the cache
+    // cannot: save order. Trim what it proves is gone before merging the rest.
+    // A suspiciously small pass proves nothing — it is a shape change until it
+    // repeats — so it never trims.
+    const pool =
+      authoritative || suspicious ? existing : pruneDeletedAbove(bookmarks, existing, seenIds);
+
+    // runSync never rewrites the tombstone map. A delete can land while this
+    // pass is fetching, and writing back the map we read at the start would
+    // erase the very signal that stops the ghost.
+    let merged = dropForgotten(
+      authoritative ? bookmarks : mergeNewest(bookmarks, pool, seenIds),
+      forgotten,
+      seenIds,
+      startedAt
+    );
     const mergedUsers = authoritative ? users : Object.assign({}, existingUsers, users);
     const pendingWrite = suspicious
       ? { count: bookmarks.length, at: Date.now() }
@@ -487,6 +575,19 @@ async function runSync(opts = {}) {
       [STORE.lastFullSync]: authoritative ? Date.now() : stored[STORE.lastFullSync] || 0,
       [STORE.pendingFull]: pendingWrite,
     });
+
+    // This pass carried the tombstones it saw when it started. One that landed
+    // while it was fetching still has to win, or a delete made at the wrong
+    // moment leaves a ghost that only tomorrow's walk retires.
+    const late = (await chrome.storage.local.get(STORE.forgotten))[STORE.forgotten];
+    const survivors = dropForgotten(merged, late, seenIds, startedAt);
+    if (survivors.length !== merged.length) {
+      merged = survivors;
+      await chrome.storage.local.set({
+        [STORE.bookmarks]: merged,
+        [STORE.bookmarkCount]: merged.length,
+      });
+    }
 
     if (suspicious) {
       console.warn(
@@ -559,27 +660,38 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
   }
 
   if (message.action === "forgetBookmark") {
-    // X just confirmed a DeleteBookmark. Drop it from the cache now; the rail
-    // and any open tab re-render from this write, and the daily full sync
-    // remains the backstop for removals made anywhere we are not watching.
+    // X just confirmed a DeleteBookmark. Drop it from the cache now and record
+    // a tombstone, so a sync that was already in flight cannot put it back: it
+    // merges a snapshot taken before the user hit the icon, and only the
+    // tombstone knows better. Removals made where we are not watching are
+    // covered by the save-order trim and the daily full walk.
     const id = typeof message.id === "string" ? message.id : "";
     if (!/^\d{5,25}$/.test(id)) {
       sendResponse({ success: false });
       return;
     }
-    chrome.storage.local.get([STORE.bookmarks]).then(async (d) => {
+    // Two quick un-bookmarks must not race each other: both handlers read the
+    // map, add their own id, and write the whole thing back, so the later write
+    // would drop the earlier tombstone. Queue them.
+    const job = forgetQueue.then(async () => {
+      const d = await chrome.storage.local.get([STORE.bookmarks, STORE.forgotten]);
       const list = Array.isArray(d[STORE.bookmarks]) ? d[STORE.bookmarks] : [];
       const next = list.filter((b) => String(b.id) !== id);
-      if (next.length === list.length) {
-        sendResponse({ success: true, removed: 0 });
-        return;
-      }
+      const forgotten =
+        d[STORE.forgotten] && typeof d[STORE.forgotten] === "object" ? d[STORE.forgotten] : {};
+      forgotten[id] = Date.now();
       await chrome.storage.local.set({
         [STORE.bookmarks]: next,
         [STORE.bookmarkCount]: next.length,
+        [STORE.forgotten]: pruneForgotten(forgotten),
       });
-      sendResponse({ success: true, removed: list.length - next.length });
+      return list.length - next.length;
     });
+    forgetQueue = job.catch(() => {});
+    job.then(
+      (removed) => sendResponse({ success: true, removed }),
+      () => sendResponse({ success: false })
+    );
     return true;
   }
 
